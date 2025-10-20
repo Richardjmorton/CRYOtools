@@ -1,0 +1,22 @@
+[project]
+name = "CRYOtools"
+version = "0.1.0"
+description = "A package with subpackages"
+authors = [{name = "Your Name", email = "you@example.com"}]
+readme = "README.md"
+license = {text = "MIT"}
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Include any package_data you list below
+include-package-data = true
+# Find all your packages under the default layout (i.e. where you put them)
+packages = { find = {} }
+
+[tool.setuptools.package-data]
+# Glob patterns relative to the package directory
+"mypackage" = ["models/*.out", "data/*.npy"]

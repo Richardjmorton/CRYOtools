@@ -1,0 +1,17 @@
+def load_asdf(dataset_directory):
+    '''
+    Loads asdf and prints size of data set
+    '''
+    asdf_filename = glob.glob(dataset_directory+'*.asdf')
+
+    if len(asdf_filename) == 1:
+        dset = dkist.load_dataset(asdf_filename[0])
+        print(f"Dataset data shape: {dset.data.shape}")
+        return dset
+    elif len(asdf_filename) == 0:
+        print(f"No files found")
+    else:
+        print(f"Multiple files found.")
+
+    
+    return None
