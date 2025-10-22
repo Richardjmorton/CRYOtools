@@ -10,3 +10,4 @@ CRYOtools.egg-info/SOURCES.txt
 CRYOtools.egg-info/dependency_links.txt
 CRYOtools.egg-info/top_level.txt
 CRYOtools/extra/__init__.py
+tests/test_input_builders.py
