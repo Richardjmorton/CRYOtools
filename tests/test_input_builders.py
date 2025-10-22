@@ -149,6 +149,7 @@ def generate_slit_coordinate_inputs(
         wcs = WCS(hdr)
         # WCS expects pixel indices, hence the (0-based) range below.
         xy = wcs.array_index_to_world(0, np.arange(slit_length), 0)[1]
+
         x = xy.Tx.value
         y = xy.Ty.value
         obstime = xy[0].obstime.to_datetime()
@@ -189,6 +190,7 @@ def generate_spectral_coordinate_input(
 
     nwv = int(header["NAXIS1"])
     pixels = np.arange(nwv) if pixel_indices is None else np.array(pixel_indices)
+
     wcs = WCS(header)
     coords = wcs.array_index_to_world(0, 0, pixels)[0]
     spec_coords = coords.to(u.nm).value
