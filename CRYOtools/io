@@ -1,17 +1,40 @@
-def load_asdf(dataset_directory):
-    '''
-    Loads asdf and prints size of data set
-    '''
-    asdf_filename = glob.glob(dataset_directory+'*.asdf')
+"""Convenience wrappers for reading DKIST ASDF datasets."""
+
+from __future__ import annotations
+
+import glob
+from typing import Any, Optional
+
+import dkist
+
+
+def load_asdf(dataset_directory: str) -> Optional[Any]:
+    """Load a DKIST ASDF dataset located in ``dataset_directory``.
+
+    Parameters
+    ----------
+    dataset_directory:
+        Folder containing the ASDF file. A trailing separator simplifies the
+        ``glob`` pattern used to find the dataset.
+
+    Returns
+    -------
+    Optional[Any]
+        Loaded dataset object, or ``None`` when none or multiple matches are
+        present.
+    """
+
+    asdf_filename = glob.glob(dataset_directory + "*.asdf")
 
     if len(asdf_filename) == 1:
-        dset = dkist.load_dataset(asdf_filename[0])
-        print(f"Dataset data shape: {dset.data.shape}")
-        return dset
-    elif len(asdf_filename) == 0:
-        print(f"No files found")
-    else:
-        print(f"Multiple files found.")
+        dataset = dkist.load_dataset(asdf_filename[0])
+        # Provide immediate feedback on the size of the dataset for debugging.
+        print(f"Dataset data shape: {dataset.data.shape}")
+        return dataset
 
-    
+    if len(asdf_filename) == 0:
+        print("No files found")
+    else:
+        print("Multiple files found.")
+
     return None
