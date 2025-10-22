@@ -45,7 +45,7 @@ REQUIRED_HEADER_PREFIXES: Tuple[str, ...] = (
 def _load_primary_header(path: Union[str, Path]) -> Header:
     """Read the primary HDU header from ``path`` without data blocks."""
     with fits.open(path) as hdul:
-        header = hdul[0].header.copy()
+        header = hdul[1].header.copy()
     return header
 
 
@@ -149,8 +149,9 @@ def generate_slit_coordinate_inputs(
         wcs = WCS(hdr)
         # WCS expects pixel indices, hence the (0-based) range below.
         xy = wcs.array_index_to_world(0, np.arange(slit_length), 0)[1]
-        x = xy.Tx.to(u.arcsec).value
-        y = xy.Ty.to(u.arcsec).value
+
+        x = xy.Tx.value
+        y = xy.Ty.value
         obstime = xy[0].obstime.to_datetime()
 
         scan_idx = int(hdr["CNCURSCN"]) - 1
@@ -206,6 +207,29 @@ def generate_spectral_coordinate_input(
 # Derived numeric arrays for physics/unit tests
 # ---------------------------------------------------------------------------
 
+def which_line(spec_coords: np.ndarray, verbose: bool = True) -> Tuple[float, int, int]:
+    """Return the central wavelength and indices for the line and continuum pixels."""
+
+    if (1074.65 > spec_coords.min()) and (1074.65 < spec_coords.max()):
+        wv_cen = 1074.65  # wavelength center of targeted coronal Fe XIII line
+        # pixel location of coronal line
+        wv_line = np.argmin(np.abs(spec_coords - 1074.65))
+        wv_cont = np.argmin(np.abs(spec_coords - 1074.0))  # pixel location of clean continuum
+    elif (1079.8 > spec_coords.min()) and (1079.8 < spec_coords.max()):
+
+        wv_cen = 1079.8  # wavelength center of targeted coronal Fe XIII line
+        wv_line = np.argmin(np.abs(spec_coords - 1079.8))  # pixel location of coronal line
+        wv_cont = np.argmin(np.abs(spec_coords - 1080.2))  # pixel location of clean continuum
+    else:
+        print('Wavelength case not handled ye')
+        raise
+
+    if verbose:
+        print(f"Coronal line nominal center wavelength [nm]: {wv_cen}")
+        print(f"Spectral pixel index for coronal line: {wv_line}")
+        print(f"Spectral pixel index for continuum reference: {wv_cont}")
+
+    return wv_cen, wv_line, wv_cont
 
 def build_sample_numeric_arrays(
     hpxy_coords: np.ndarray,
@@ -242,7 +266,7 @@ def build_sample_numeric_arrays(
     if line_core_index is None:
         line_core_index = int(spec_coords.size // 2)
 
-    line_core_wavelength = spec_coords[line_core_index]
+    _, line_core_wavelength,_ =  which_line(spec_coords, verbose=False)
     wavelength_shifts = spec_coords - line_core_wavelength
 
     # Estimate a stable FWHM surrogate from the local slope to keep values
