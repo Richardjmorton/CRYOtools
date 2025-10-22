@@ -41,7 +41,7 @@ def plot_slit_locs(hpxy_coords, time_coords, slit_pos=0):
     #axes[0].set_xticklabels([])
     #axes[0].set_xlabel('')
     sol_rad = np.sqrt(locs[0]**2+locs[1]**2)
-    axes[2].plot(time_coords.ravel(), sol_rad.squeeze(), '+')
+    axes[2].plot(time_coords.ravel(), sol_rad.squeeze().ravel(), '+')
     axes[2].set_ylabel(r'$R_\odot$ (arcsec)')
     axes[2].yaxis.set_major_formatter(fmt)
     # Add a global title
@@ -136,8 +136,13 @@ def which_line(spec_coords, verbose=True):
     return wv_cen, wv_line, wv_cont
 
 
-def plot_line_example(data, spec_coords, hpxy_coords, hdrs, scan_step=0, yp=1200):
+def plot_line_example(data, spec_coords, hpxy_coords, hdrs, scan_step=0, along_pos=1200):
+    '''
+    Plots a scan exposure and a line profile from scan.
 
+    scan_step - set which exposure to plot
+    along_pos - position along slit
+    '''
 
 
     res = return_obs_info(hdrs, verbose=False)
@@ -149,11 +154,17 @@ def plot_line_example(data, spec_coords, hpxy_coords, hdrs, scan_step=0, yp=1200
 
     extent = (spec_coords[0], spec_coords[-1], 0, n_along_slit*slit_samp)
 
+    if along_pos < 0: along_pos = n_along_slit + along_pos
+    if (along_pos<0) or (along_pos > n_along_slit):
+         raise ValueError("along_pos must be between 0 and {0}, got {1}".format(n_along_slit-1,along_pos))
+
+    if (scan_step<0) or (scan_step > n_scan_steps):
+         raise ValueError("along_pos must be between 0 and {0}, got {1}".format(n_scan_steps-1,scan_step))
 
     fig,ax = plt.subplots(1,2,figsize = (9,4),width_ratios=[0.3,0.7])
     ax = ax.flatten()
 
-    im0 = ax[0].imshow(data[0, scan_step, 0, :,:],extent=extent, aspect = 'auto')
+    im0 = ax[0].imshow(data[0, scan_step, 0, :,:],extent=extent, aspect = 'auto', origin='lower')
     im0.set_clim(np.nanpercentile(data[0,scan_step,0,:,:],[1,99]))
     
     ax[0].set_xlabel("Wavelength [nm]")
@@ -161,11 +172,11 @@ def plot_line_example(data, spec_coords, hpxy_coords, hdrs, scan_step=0, yp=1200
     ax[0].set_title("Spectral Image")
     
     
-    ax[0].axhline(yp*slit_samp, ls = 'dashed',color = 'blue')
+    ax[0].axhline(along_pos*slit_samp, ls = 'dashed',color = 'blue')
     cax = ax[0].inset_axes([1.04, 0.05, 0.05, 0.95], transform=ax[0].transAxes)
     cbar = fig.colorbar(ax[0].get_images()[0],ax=ax[0],cax=cax)
 
-    ax[1].plot(spec_coords,data[0,scan_step,0,yp,:],color = 'blue')
+    ax[1].plot(spec_coords,data[0,scan_step,0,along_pos,:],color = 'blue')
     ax[1].set_xlabel("Wavelength [nm]")
     ax[1].set_title("Extracted Spectral Profile")
     ax[1].set_ylabel(r"Spectral Radiance [$\mu$B$_{\odot}$]")
