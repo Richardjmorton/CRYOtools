@@ -58,3 +58,5 @@ Plotting helpers streamline quick-look inspection of data products and fit outpu
 - It implements JIT-compiled convolution and Gaussian routines via Numba, along with shared-memory infrastructure for multiprocessing across slit positions.【F:CRYOtools/fit_test.py†L1-L200】
 - The module reuses the same atlas loaders, cross-correlation lag estimation, parameter bounds, and optimisation strategy but trades JAX for explicit `SharedMemory` arrays and ProcessPool executors to experiment with different performance characteristics.【F:CRYOtools/fit_test.py†L20-L200】
 
+# Testing
+- Always run `python -m compileall CRYOtools`
