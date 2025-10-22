@@ -361,7 +361,30 @@ def ensure_directory(directory_path: str) -> None:
     else:
         print(f"Directory already exists: {directory_path}")
 
+def which_line(spec_coords: np.ndarray, verbose: bool = True) -> Tuple[float, int, int]:
+    """Return the central wavelength and indices for the line and continuum pixels."""
 
+    if (1074.65 > spec_coords.min()) and (1074.65 < spec_coords.max()):
+        wv_cen = 1074.65  # wavelength center of targeted coronal Fe XIII line
+        # pixel location of coronal line
+        wv_line = np.argmin(np.abs(spec_coords - 1074.65))
+        wv_cont = np.argmin(np.abs(spec_coords - 1074.0))  # pixel location of clean continuum
+    elif (1079.8 > spec_coords.min()) and (1079.8 < spec_coords.max()):
+
+        wv_cen = 1079.8  # wavelength center of targeted coronal Fe XIII line
+        wv_line = np.argmin(np.abs(spec_coords - 1079.8))  # pixel location of coronal line
+        wv_cont = np.argmin(np.abs(spec_coords - 1080.2))  # pixel location of clean continuum
+    else:
+        print('Wavelength case not handled ye')
+        raise
+
+    if verbose:
+        print(f"Coronal line nominal center wavelength [nm]: {wv_cen}")
+        print(f"Spectral pixel index for coronal line: {wv_line}")
+        print(f"Spectral pixel index for continuum reference: {wv_cont}")
+
+    return wv_cen, wv_line, wv_cont
+    
 def print_exposure(hdrs: Sequence[Header]) -> None:
     """Pretty-print key exposure-related FITS header values.
 
