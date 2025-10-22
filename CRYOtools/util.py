@@ -13,7 +13,7 @@ import warnings
 
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
-from typing import Sequence, Tuple, Union
+from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
 from tqdm import tqdm
 
@@ -35,10 +35,14 @@ def return_obs_info(hdrs: Sequence[Header], verbose: bool = True) -> Tuple[int, 
         spatial pixels along the slit.
     """
 
-    if verbose:
-        ## Show information on 1st and 2nd direction scanning (step size and number)
-        for k in 'CNP1DSS','CNP1DNSP','CNP2DSS','CNP2DNSP',:
-            print(hdrs[0][k+'*'])
+    if verbose and hdrs:
+        # Show information on 1st and 2nd direction scanning (step size and number)
+        diag_prefixes = ("CNP1DSS", "CNP1DNSP", "CNP2DSS", "CNP2DNSP")
+        first_header = hdrs[0]
+        for prefix in diag_prefixes:
+            matching_keys = [key for key in first_header.keys() if key.startswith(prefix)]
+            for key in matching_keys:
+                print(f"{key}: {first_header[key]}")
 
 
     n_scan_steps = np.max(np.array([hdr['CNCURSCN'] for hdr in hdrs]))
@@ -52,7 +56,8 @@ def return_obs_info(hdrs: Sequence[Header], verbose: bool = True) -> Tuple[int, 
 
 def get_slit_coords(
     hdrs: Sequence[Header],
-    output_dir: str = './outputs/'
+    output_dir: Union[str, os.PathLike] = './outputs/',
+    saver: Optional[Callable[[str, np.ndarray], None]] = np.save,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Derive slit spatial coordinates and acquisition times from FITS headers.
 
@@ -61,7 +66,11 @@ def get_slit_coords(
     hdrs
         Sequence of FITS headers describing each exposure.
     output_dir
-        Directory where derived coordinate arrays should be stored.
+        Directory where derived coordinate arrays should be stored when ``saver``
+        is provided.
+    saver
+        Callable invoked with ``(path, array)`` to persist outputs. Pass ``None``
+        to disable writing, which is useful for tests.
 
     Returns
     -------
@@ -89,9 +98,11 @@ def get_slit_coords(
             time_coords[CNCURSCN-1,CNCMEAS-1] = obstime.to_datetime()
 
     ## Save the dataset coordinates to the location of your choice (defaults to working directory)
-    ensure_directory(output_dir)
-    np.save(output_dir + 'hpxy_coords.npy', hpxy_coords)
-    np.save(output_dir + 'time_coords.npy', time_coords)
+    if saver is not None:
+        output_dir_path = os.fspath(output_dir)
+        ensure_directory(output_dir_path)
+        saver(os.path.join(output_dir_path, 'hpxy_coords.npy'), hpxy_coords)
+        saver(os.path.join(output_dir_path, 'time_coords.npy'), time_coords)
 
     print(f"Helioprojective XY Coordinates Shape: {hpxy_coords.shape}")
     print(f"Datetime Coordinates Shape: {time_coords.shape}")
@@ -100,7 +111,8 @@ def get_slit_coords(
 
 def get_spectral_coords(
     hdrs: Sequence[Header],
-    output_dir: str = './outputs/'
+    output_dir: Union[str, os.PathLike] = './outputs/',
+    saver: Optional[Callable[[str, np.ndarray], None]] = np.save,
 ) -> np.ndarray:
     """Compute the spectral dispersion axis in nanometers using WCS tools.
 
@@ -109,7 +121,11 @@ def get_spectral_coords(
     hdrs
         Sequence of FITS headers describing each exposure.
     output_dir
-        Directory where derived spectral coordinates should be stored.
+        Directory where derived spectral coordinates should be stored when
+        ``saver`` is provided.
+    saver
+        Callable invoked with ``(path, array)`` to persist outputs. Pass ``None``
+        to disable writing, which is useful for tests.
 
     Returns
     -------
@@ -128,8 +144,10 @@ def get_spectral_coords(
         spec_coords = wcs.array_index_to_world(0,0,np.arange(nwv))[0].to(u.nm).value
 
     # Save the dataset coordinates (defaults to working directory)
-    ensure_directory(output_dir)
-    np.save(output_dir + 'spec_coords.npy',spec_coords)
+    if saver is not None:
+        output_dir_path = os.fspath(output_dir)
+        ensure_directory(output_dir_path)
+        saver(os.path.join(output_dir_path, 'spec_coords.npy'), spec_coords)
     print(f"Spectral Coordinates Shape: {spec_coords.shape}")
 
     return spec_coords
@@ -161,12 +179,17 @@ def get_slit_samp(
     providing an accurate physical spacing.
     """
 
-    if n_scan_steps<=1:
-        step_width = 0.
-        slit_samp = np.sqrt((hpxy_coords[0,0,0,1]-hpxy_coords[0,0,0,0])**2 + (hpxy_coords[1,0,0,1]-hpxy_coords[1,0,0,0])**2 )
+    if hpxy_coords.shape[-1] < 2:
+        raise ValueError("`hpxy_coords` must span at least two pixels along the slit.")
+
+    base_vec = hpxy_coords[:, 0, 0, 1] - hpxy_coords[:, 0, 0, 0]
+    slit_samp = np.linalg.norm(base_vec)
+
+    if n_scan_steps <= 1:
+        step_width = 0.0
     else:
-        step_width = np.sqrt((hpxy_coords[0,1,0,0]-hpxy_coords[0,0,0,0])**2 + (hpxy_coords[1,1,0,0]-hpxy_coords[1,0,0,0])**2 )
-        slit_samp = np.sqrt((hpxy_coords[0,0,0,1]-hpxy_coords[0,0,0,0])**2 + (hpxy_coords[1,0,0,1]-hpxy_coords[1,0,0,0])**2 )
+        step_vec = hpxy_coords[:, 1, 0, 0] - hpxy_coords[:, 0, 0, 0]
+        step_width = np.linalg.norm(step_vec)
     
     if verbose:
         print(f'Raster step size in arcsec: {step_width}')
@@ -188,15 +211,11 @@ def _get_sc_mp(
     header = Header.fromstring(header_str,sep="\n")
 
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore") # TO ELIMINATE datafix warnings
+        warnings.simplefilter("ignore")  # TO ELIMINATE datafix warnings
         wcs = WCS(header)
-        print(wcs)
-        xy = wcs.array_index_to_world(0,np.arange(n_alongSlit),0)[1]
-        print(type(xy[0]))
-        print(type(xy[1]))
-        x,y,obstime = xy.Tx.value,xy.Ty.value,xy[0].obstime
-        print('x', x)
-    return header['CNCURSCN'],header['CNCMEAS'],x,y, obstime.to_datetime()
+        xy = wcs.array_index_to_world(0, np.arange(n_alongSlit), 0)[1]
+        x, y, obstime = xy.Tx.value, xy.Ty.value, xy[0].obstime
+    return header['CNCURSCN'], header['CNCMEAS'], x, y, obstime.to_datetime()
 
 
 def _unpack_and_run(args: Tuple[str, int, int]) -> Tuple[int, int, np.ndarray, np.ndarray, datetime]:
@@ -207,7 +226,8 @@ def _unpack_and_run(args: Tuple[str, int, int]) -> Tuple[int, int, np.ndarray, n
 def get_slit_coords_mp(
     hdrs: Sequence[Header],
     cpu_max: int =4,
-    output_dir: str ='./outputs/'
+    output_dir: Union[str, os.PathLike] ='./outputs/',
+    saver: Optional[Callable[[str, np.ndarray], None]] = np.save,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Extract slit coordinates from FITS headers using multiprocessing.
 
@@ -218,7 +238,11 @@ def get_slit_coords_mp(
     cpu_max
         Upper bound on the number of worker processes to spawn.
     output_dir
-        Directory where derived coordinate arrays should be stored.
+        Directory where derived coordinate arrays should be stored when ``saver``
+        is provided.
+    saver
+        Callable invoked with ``(path, array)`` to persist outputs. Pass ``None``
+        to disable writing, which is useful for tests.
 
     Returns
     -------
@@ -249,14 +273,32 @@ def get_slit_coords_mp(
             time_coords[CNCURSCN-1,CNCMEAS-1] = obstime
     
     # Save the dataset coordinates (defaults to working directory)
-    ensure_directory(output_dir)
-    np.save(output_dir + 'hpxy_coords.npy',hpxy_coords)
-    np.save(output_dir + 'time_coords.npy',time_coords)
+    if saver is not None:
+        output_dir_path = os.fspath(output_dir)
+        ensure_directory(output_dir_path)
+        saver(os.path.join(output_dir_path, 'hpxy_coords.npy'), hpxy_coords)
+        saver(os.path.join(output_dir_path, 'time_coords.npy'), time_coords)
 
     print(f"Helioprojective XY Coordinates Shape: {hpxy_coords.shape}")
     print(f"Datetime Coordinates Shape: {time_coords.shape}")
 
     return hpxy_coords, time_coords
+
+def _flatten_time_axis(tc: np.ndarray) -> np.ndarray:
+    """Return a flattened ``datetime64`` array preserving acquisition order."""
+
+    flattened = np.asarray(tc).squeeze()
+    if flattened.ndim == 0:
+        flattened = flattened[None]
+    return flattened
+
+
+def _timedelta_to_seconds(deltas: Iterable[np.timedelta64]) -> np.ndarray:
+    """Convert an iterable of ``numpy.timedelta64`` objects to seconds."""
+
+    deltas = np.asarray(list(deltas), dtype='timedelta64[ns]')
+    return deltas.astype(np.float64) * 1e-9
+
 
 def calculate_cadence(tc: np.ndarray, plot_cad: bool = False) -> float:
     """Estimate the median cadence of observations in seconds.
@@ -273,17 +315,24 @@ def calculate_cadence(tc: np.ndarray, plot_cad: bool = False) -> float:
     float
         Median cadence in seconds between successive exposures.
     """
-    tc = tc.squeeze()
+    flattened = _flatten_time_axis(tc)
+    if flattened.size < 2:
+        raise ValueError("Cadence calculation requires at least two timestamps.")
 
-    # Differences between successive timestamps expressed in seconds.
-    cad = [ (tc[i]-tc[i-1]).item().total_seconds() for i, _ in enumerate(tc)]
-    med_cad = np.median(cad[1:])
+    diffs = np.diff(flattened)
+    cad_seconds = _timedelta_to_seconds(diffs)
+    med_cad = float(np.median(cad_seconds))
 
     if plot_cad:
-        plt.plot(cad[1:], '.')
-        plt.xtitle('Frames')
-        plt.ytitle('Seconds')
-        plt.savefig('cadence_values.png')
+        import matplotlib.pyplot as plt  # Local import to avoid mandatory dependency
+
+        fig, ax = plt.subplots()
+        ax.plot(cad_seconds, '.', label='Cadence (s)')
+        ax.set_xlabel('Frame')
+        ax.set_ylabel('Seconds')
+        ax.legend()
+        fig.savefig('cadence_values.png')
+        plt.close(fig)
 
     return med_cad
 
@@ -303,10 +352,11 @@ def shift_to_v(
     lam_cor
         Empirical correction applied to the measured wavelength shifts.
     """
-    c_km_s = const.c.to(u.km/u.s)
-     # correction to measured shifts (from fitting procedure)
-    F = (delta_lam-lam_cor)/lam_0-1
-    return (F**2-1)/(F**2+1)*c_km_s # Doppler formula
+    c_km_s = const.c.to(u.km / u.s)
+    # correction to measured shifts (from fitting procedure)
+    corrected = (delta_lam - lam_cor) / lam_0
+    F = corrected - 1
+    return ((F ** 2 - 1) / (F ** 2 + 1)) * c_km_s  # Doppler formula
 
 
 def calc_ntlw(
@@ -335,31 +385,35 @@ def calc_ntlw(
     """
 
     if np.ndim(v_th) == 0:
-       v_th = np.full_like(data, v_th)
-
-    elif isinstance(v_th, (list, tuple, np.ndarray)):
-        v_th = np.asarray(v_th)
-        if v_th.shape != data.shape:
-            raise ValueError(f"`v_th` must be either a scalar or the same shape as `data` (got {v_th.shape}, expected {data.shape})")
-
-    v_th = v_th *u.km/u.s # km/s
-    fac = 2*np.sqrt(np.log(2))
-    w_i = wave*u.nm /res_pow # nm
-    scale = wave*u.nm/ const.c.to(u.nm/u.s)
-
-    fwhm = np.sqrt(2)*fac*data*u.nm # nm
-    ntlw = np.sqrt((fwhm**2-w_i**2)/scale**2/fac**2-v_th.to(u.nm/u.s)**2)
-
-    return ntlw.to(u.km/u.s)
-
-
-def ensure_directory(directory_path: str) -> None:
-    """Create *directory_path* if it does not already exist."""
-    if not os.path.exists(directory_path):
-        os.makedirs(directory_path)
-        print(f"Directory created: {directory_path}")
+        v_th = np.full_like(data, v_th, dtype=float)
     else:
-        print(f"Directory already exists: {directory_path}")
+        v_th = np.asarray(v_th, dtype=float)
+        if v_th.shape != data.shape:
+            raise ValueError(
+                "`v_th` must be either a scalar or the same shape as `data` "
+                f"(got {v_th.shape}, expected {data.shape})"
+            )
+
+    v_th = v_th * u.km / u.s  # km/s
+    fac = 2 * np.sqrt(np.log(2))
+    w_i = wave * u.nm / res_pow  # nm
+    scale = wave * u.nm / const.c.to(u.nm / u.s)
+
+    fwhm = np.sqrt(2) * fac * data * u.nm  # nm
+    ntlw = np.sqrt((fwhm ** 2 - w_i ** 2) / (scale ** 2 * fac ** 2) - v_th.to(u.nm / u.s) ** 2)
+
+    return ntlw.to(u.km / u.s)
+
+
+def ensure_directory(directory_path: Union[str, os.PathLike]) -> None:
+    """Create *directory_path* if it does not already exist."""
+
+    path = os.fspath(directory_path)
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print(f"Directory created: {path}")
+    else:
+        print(f"Directory already exists: {path}")
 
 
 def print_exposure(hdrs: Sequence[Header]) -> None:
@@ -372,6 +426,16 @@ def print_exposure(hdrs: Sequence[Header]) -> None:
     """
     exposureKeys = ['XPOSURE','TEXPOSUR','CAM_FPS','CNNSCI','CNNNDR','CNMODNST','CNNMEAS']
     for key in exposureKeys:
-        print(f"{key.ljust(10)} {hdrs[0].comments[key].ljust(25)} {hdrs[0][key]} ")
-    print(f"Time between ramps (i.e. triggers): {1./hdrs[0]['CAM_FPS']*1000.} msec")
-    print(f"Times between first and last trigger: {Time(hdrs[-1]['DATE-AVG']).to_datetime() -Time(hdrs[0]['DATE-AVG']).to_datetime()}")
+        if key not in hdrs[0]:
+            continue
+        comment = hdrs[0].comments.get(key, '')
+        print(f"{key.ljust(10)} {comment.ljust(25)} {hdrs[0][key]} ")
+
+    if 'CAM_FPS' in hdrs[0]:
+        cadence_ms = 1000.0 / hdrs[0]['CAM_FPS']
+        print(f"Time between ramps (i.e. triggers): {cadence_ms} msec")
+
+    if 'DATE-AVG' in hdrs[0] and 'DATE-AVG' in hdrs[-1]:
+        delta = Time(hdrs[-1]['DATE-AVG']).to_datetime() - Time(hdrs[0]['DATE-AVG']).to_datetime()
+        print(f"Times between first and last trigger: {delta}")
+
