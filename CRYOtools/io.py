@@ -287,6 +287,10 @@ def get_fits_data(
 ) -> Tuple[np.ndarray, List[str]]:
     """Read Cryo FITS files from ``dataset_directory`` using multiprocessing.
 
+    Note, this routine automatically co-adds multiple exposures. Hence, if only reading
+    in a portion of the data, then you have to ensure that file_start and file_end 
+    correspond to the start/end of a batch of exposures. 
+
     Parameters
     ----------
     dataset_directory:
@@ -331,9 +335,11 @@ def get_fits_data(
     # measurement slot because repeats will be co-added, whereas sit-and-stare
     # observations retain the measurement dimension.
     if n_scan_steps > 1:
+        # raster
         data = np.zeros((n_stokes, n_scan_steps, 1, n_along_slit, n_wv), dtype=float)
         coadd_index = np.zeros(n_scan_steps)
     else:
+        # sit-and-stare
         data = np.zeros(
             (n_stokes, 1, n_meas_at_step - file_start, n_along_slit, n_wv),
             dtype=float,
@@ -354,15 +360,17 @@ def get_fits_data(
 
         for current_scan, current_meas, images in results:
             if n_scan_steps > 1:
+                # raster
                 data[:, current_scan - 1, 0, :, :] += np.array(images)
                 coadd_index[current_scan - 1] += 1
             else:
+                # sit and stare
                 data[:, 0, current_meas - 1 - file_start, :, :] = np.array(images)
 
     if n_scan_steps > 1:
         # Normalise the co-added images by the number of measurements.
         data = data / coadd_index[None, :, None, None, None]
-
+        print('Multiple exposures co-added and averaged.')
     if convert_phot:
         data = data * 1e6
 

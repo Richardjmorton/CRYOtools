@@ -338,7 +338,33 @@ def calculate_cadence(tc: np.ndarray, plot_cad: bool = False) -> float:
         plt.close(fig)
  
     return med_cad
+
+
+def which_line(spec_coords: np.ndarray, verbose: bool = True) -> Tuple[float, int, int]:
+    """Return the central wavelength and indices for the line and continuum pixels."""
+
+    if (1074.65 > spec_coords.min()) and (1074.65 < spec_coords.max()):
+        wv_cen = 1074.65  # wavelength center of targeted coronal Fe XIII line
+        # pixel location of coronal line
+        wv_line = np.argmin(np.abs(spec_coords - 1074.65))
+        wv_cont = np.argmin(np.abs(spec_coords - 1074.0))  # pixel location of clean continuum
+    elif (1079.8 > spec_coords.min()) and (1079.8 < spec_coords.max()):
+
+        wv_cen = 1079.8  # wavelength center of targeted coronal Fe XIII line
+        wv_line = np.argmin(np.abs(spec_coords - 1079.8))  # pixel location of coronal line
+        wv_cont = np.argmin(np.abs(spec_coords - 1080.2))  # pixel location of clean continuum
+    else:
+        print('Wavelength case not handled yet')
+        raise
+
+    if verbose:
+        print(f"Coronal line nominal center wavelength [nm]: {wv_cen}")
+        print(f"Spectral pixel index for coronal line: {wv_line}")
+        print(f"Spectral pixel index for continuum reference: {wv_cont}")
+
+    return wv_cen, wv_line, wv_cont
  
+
 def shift_to_v(
     delta_lam: np.ndarray,
     lam_0: float = 1074.7,
@@ -432,7 +458,7 @@ def print_exposure(hdrs: Sequence[Header]) -> None:
     for key in exposureKeys:
         if key not in hdrs[0]:
             continue
-        comment = hdrs[0].comments.get(key, '')
+        comment = hdrs[0].comments[key]
         print(f"{key.ljust(10)} {comment.ljust(25)} {hdrs[0][key]} ")
 
     if 'CAM_FPS' in hdrs[0]:

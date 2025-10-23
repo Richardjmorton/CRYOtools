@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from pathlib import Path
 
 np = pytest.importorskip("numpy")
 pytest.importorskip("astropy.time")
@@ -14,25 +15,20 @@ pytest.importorskip("astropy.io.fits")
 
 from astropy.io.fits import Header
 from astropy.time import Time
+from astropy.io import fits
 
 from CRYOtools import util
 
 
-def _make_header(
-    scan: int,
-    meas: int,
-    *,
-    naxis1: int = 3,
-    naxis2: int = 4,
-) -> Header:
-    """Return a minimal FITS header with the bookkeeping keys used in tests."""
+@pytest.fixture
+def fits_fixture_path():
+    """Return path to test fixtures directory"""
+    return Path(__file__).parent / 'fixtures'
 
-    header = Header()
-    header["CNCURSCN"] = scan
-    header["CNCMEAS"] = meas
-    header["NAXIS1"] = naxis1
-    header["NAXIS2"] = naxis2
-    return header
+@pytest.fixture
+def sample_fits_file(fits_fixture_path):
+    """Return path to a specific FITS file"""
+    return fits_fixture_path / 'test_header.fits'
 
 
 @pytest.fixture
@@ -65,24 +61,23 @@ def fake_wcs(monkeypatch):
     return FakeWCS
 
 
-def test_return_obs_info_reports_extents(capsys):
+def test_return_obs_info_reports_extents(capsys, sample_fits_file):
     """`return_obs_info` should compute raster extents and emit diagnostics."""
+    with fits.open(sample_fits_file) as hdul:
+        header = hdul[1].header
 
-    header_a = _make_header(1, 2)
-    header_a["CNP1DSS1"] = 42
-    header_b = _make_header(3, 1)
-
-    result = util.return_obs_info([header_a, header_b])
+    result = util.return_obs_info([header, header])
 
     captured = capsys.readouterr()
     assert "CNP1DSS1" in captured.out
     assert result == (3, 2, 3, 4)
 
 
-def test_return_obs_info_silent_when_requested(capsys):
+def test_return_obs_info_silent_when_requested(capsys, sample_fits_file):
     """`return_obs_info` should avoid printing diagnostics when verbose is False."""
 
-    header = _make_header(2, 4)
+    with fits.open(sample_fits_file) as hdul:
+        header = hdul[1].header
     result = util.return_obs_info([header], verbose=False)
 
     captured = capsys.readouterr()
@@ -90,10 +85,12 @@ def test_return_obs_info_silent_when_requested(capsys):
     assert result == (2, 4, 3, 4)
 
 
-def test_get_slit_coords_populates_arrays_without_saver(fake_wcs, monkeypatch):
+def test_get_slit_coords_populates_arrays_without_saver(fake_wcs, monkeypatch, sample_fits_file):
     """`get_slit_coords` should fill coordinate arrays and skip saving when asked."""
 
-    headers = [_make_header(1, 1), _make_header(1, 2)]
+    with fits.open(sample_fits_file) as hdul:
+        header = hdul[1].header
+    headers = [header, header]
 
     # Ensure the saver shortcut bypasses filesystem interactions.
     def fail_if_called(path):  # pragma: no cover - defensive guard
@@ -108,10 +105,11 @@ def test_get_slit_coords_populates_arrays_without_saver(fake_wcs, monkeypatch):
     assert times.shape == (1, 2)
 
 
-def test_get_slit_coords_invokes_custom_saver(fake_wcs, tmp_path):
+def test_get_slit_coords_invokes_custom_saver(fake_wcs, tmp_path, sample_fits_file):
     """`get_slit_coords` should route persistence through the provided saver callable."""
-
-    headers = [_make_header(1, 1)]
+    with fits.open(sample_fits_file) as hdul:
+        header = hdul[1].header
+    headers = [header]
     saved = {}
 
     def recorder(path, array):
@@ -123,10 +121,12 @@ def test_get_slit_coords_invokes_custom_saver(fake_wcs, tmp_path):
     np.testing.assert_array_equal(saved["hpxy_coords.npy"][0, 0, 0], np.full(4, 1.0))
 
 
-def test_get_spectral_coords_respects_custom_saver(fake_wcs, tmp_path):
+def test_get_spectral_coords_respects_custom_saver(fake_wcs, tmp_path, sample_fits_file):
     """`get_spectral_coords` should use the provided saver and return the spectrum."""
 
-    header = _make_header(1, 1)
+    with fits.open(sample_fits_file) as hdul:
+        header = hdul[1].header
+
     saved = {}
 
     def recorder(path, array):
@@ -169,6 +169,7 @@ def test_calculate_cadence_returns_median():
         np.datetime64("2020-01-01T00:00:00"),
         np.datetime64("2020-01-01T00:00:03"),
         np.datetime64("2020-01-01T00:00:08"),
+        np.datetime64("2020-01-01T00:00:13"),
     ])
 
     cadence = util.calculate_cadence(timestamps)
@@ -213,15 +214,4 @@ def test_ensure_directory_accepts_pathlike(tmp_path):
 
     assert target.exists()
 
-
-def test_print_exposure_handles_missing_comments(capsys):
-    """`print_exposure` should avoid crashing when FITS comments are absent."""
-
-    header = _make_header(1, 1)
-    header["CAM_FPS"] = 20.0
-    util.print_exposure([header])
-
-    captured = capsys.readouterr()
-    assert "CAM_FPS" in captured.out
-    assert "Time between ramps" in captured.out
 

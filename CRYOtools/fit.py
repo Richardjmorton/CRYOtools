@@ -669,15 +669,23 @@ class fit_data:
         """Plot the observed data, fitted model, and residuals."""
 
         self.model = self.calculate_model()
-
+        extent = [self.spec_coords[0], self.spec_coords[-1],0,self.n_along_slit]
         fig, ax = plt.subplots(1, 3)
-        ax[0].imshow(self.data)
+        ax[0].imshow(self.data, extent=extent, aspect=0.005, origin='lower')
         ax[0].set_title("Data")
-        ax[1].imshow(self.model)
+
+        ax[1].imshow(self.model, extent=extent, aspect=0.005, origin='lower')
         ax[1].set_title("Model")
-        pl = ax[2].imshow(self.data - self.model, vmin=vmin, vmax=vmax)
+
+        pl = ax[2].imshow(self.data - self.model, vmin=vmin, vmax=vmax,
+                                extent=extent, aspect=0.005, origin='lower')
         # plt.colorbar(pl)
-        ax[2].set_title("Residual \n clipped {0} to {1}".format((vmin, vmax)))
+        ax[2].set_title("Residual \n clipped {0} to {1}".format(vmin, vmax))
+
+        for a in ax:
+            a.set_xlabel('Wavelength (nm)')
+        ax[0].set_ylabel('Pixel along slit')
+
         plt.tight_layout()
 
 def _pull_fit_res(file: str) -> List[List[Any]]:
