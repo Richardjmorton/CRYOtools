@@ -430,8 +430,12 @@ def plot_coronal_params(
     fold: int = 1,
     figsize: Tuple[float, float] = (15, 5),
     amp_clip: float = 50,
+    slit_coord: float = None
 ) -> None:
-    """Plot a subset of coronal parameters (amplitude, velocity, width)."""
+    """Plot a subset of coronal parameters (amplitude, velocity, width).
+
+        slit_coord - raster number closest to sit and stare slit. 
+    """
 
     amp = results[0]
     # Suppress extreme amplitudes that may arise from fitting artefacts.
@@ -479,10 +483,13 @@ def plot_coronal_params(
         cbar1 = fig.colorbar(axi.get_images()[0], ax=axi,cax=cax)
         cbar1.set_label(title, fontsize=8)
         #axi.set_title(title,fontsize = 10)
+        if slit_coord is not None:
+            axi.hlines(slit_coord*step_width, 0, n_along_slit*slit_samp, color='black',
+                                linestyle='--')
 
     fig.suptitle(f"Coronal Fit Parameters near {wv_cen:.2f} nm",fontsize = 14 )
-    fig.supylabel("Raster Direction [arcsec]",fontsize = 12)
-    fig.supxlabel("Along slit [arcsec]",fontsize = 12)
+    fig.supylabel("Raster Direction (arcsec)",fontsize = 12)
+    fig.supxlabel("Along slit (arcsec)",fontsize = 12)
 
     plt.tight_layout()
 

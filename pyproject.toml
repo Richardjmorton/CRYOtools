@@ -1,22 +1,53 @@
 [project]
 name = "CRYOtools"
 version = "0.1.0"
-description = "A package with subpackages"
-authors = [{name = "Your Name", email = "you@example.com"}]
+
+description = "Tools for processing and analysing DKIST Cryo-NIRSP spectropolarimetric data"
+
+authors = [
+    {name = "Richard Morton", email = "richard.morton@northumbria.ac.uk"},
+]
 readme = "README.md"
-license = {text = "MIT"}
-dependencies = []
+license = {file = "LICENSE"}
+# TODO: Verify this minimum Python version against your oldest tested environment
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "astropy>=5.3",
+    # JAX is intentionally not pinned to a hardware variant here.
+    # Users must install the correct JAX build for their hardware
+    # (CPU / CUDA / Metal) before installing CRYOtools.
+    # See: https://jax.readthedocs.io/en/latest/installation.html
+    "jax>=0.4.25",
+    "numba>=0.58",
+    "sunpy>=5.0",
+    "dkist>=1.9",
+    "hvpy>=1.0",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+# Development / testing dependencies — install with:  pip install -e ".[dev]"
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.urls]
+"Source code" = "https://github.com/Richardjmorton/CRYOtools"
+"Bug tracker" = "https://github.com/Richardjmorton/CRYOtools/issues"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# Include any package_data you list below
 include-package-data = true
-# Find all your packages under the default layout (i.e. where you put them)
 packages = { find = {} }
 
 [tool.setuptools.package-data]
-# Glob patterns relative to the package directory
-"mypackage" = ["models/*.out", "data/*.npy"]
+# Bundle the reference solar and telluric model files with the package.
+"CRYOtools" = ["models/*.out", "models/*.npy"]
