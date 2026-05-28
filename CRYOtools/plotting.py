@@ -272,6 +272,7 @@ def plot_all_params_scan(
     hpxy_coords: np.ndarray,
     hdrs: Sequence[dict],
     aspect: float = 1,
+    intm: int = 100
 ) -> None:
     """Visualise all fitted parameter maps for a raster scan observation."""
 
@@ -289,7 +290,8 @@ def plot_all_params_scan(
     'Estimated Resolving\nPower','Telluric Line \nOpacity Factor',
     'Velocity shift applied to\nscat. phot. spectrum',
     'Velocity shift applied to\ntelluric transmission','Inferred Spectral\nStraylight Fraction',
-    'Background Const.','Background Grad.','Merit Function']
+    r'Continuum at Line Centre [$\mu$B$_{\odot}$]',
+    r'Continuum Slope [$\mu$B$_{\odot}$/nm]','Merit Function']
 
 
     default_cmap = plt.get_cmap('viridis')
@@ -310,9 +312,9 @@ def plot_all_params_scan(
         if n ==0:
             amp = para_map
             # Limit extreme amplitudes that can dominate the colour scaling.
-            amp[np.abs(amp)> 150] =0
+            #amp[np.abs(amp)> 150] =0
             imn = ax[n].imshow(amp,extent = img_extent,cmap = default_cmap,
-                               norm = PowerNorm(0.85), aspect=aspect)
+                               norm = PowerNorm(0.85, vmin=0, vmax=intm), aspect=aspect)
             #imn.set_clim(np.nanpercentile(para_map,[2,98]))
         if n ==1:
             dopp_vels = shift_to_v(para_map)
@@ -322,8 +324,6 @@ def plot_all_params_scan(
         if n >1:
             imn = ax[n].imshow(para_map,extent = img_extent,cmap = default_cmap, aspect=aspect)
             imn.set_clim(np.nanpercentile(para_map,[2,98]))
-        #if n==8: imn.set_clim(0,300)
-        if n==9: imn.set_clim(0,2)
         ax[n].set_title(plotTitles[n],fontsize = 10)
 
     cbars = []
@@ -370,7 +370,8 @@ def plot_all_params_ss(
     'Estimated Resolving\nPower','Telluric Line \nOpacity Factor',
     'Velocity shift applied to\nscat. phot. spectrum',
     'Velocity shift applied to\ntelluric transmission','Inferred Spectral\nStraylight Fraction',
-    'Background Const.','Background Grad.','Merit Function']
+    r'Continuum at Line Centre [$\mu$B$_{\odot}$]',
+    r'Continuum Slope [$\mu$B$_{\odot}$/nm]','Merit Function']
 
     default_cmap = plt.get_cmap('viridis')
     default_cmap.set_bad('indigo')
@@ -397,8 +398,6 @@ def plot_all_params_ss(
         if n >1:
             imn = ax[n].imshow(para_map,extent = imgExtent,cmap = default_cmap, aspect=aspect)
             imn.set_clim(np.nanpercentile(para_map,[2,98]))
-        #if n==8: imn.set_clim(0,300)
-        if n==9: imn.set_clim(0,2)
         ax[n].set_title(plotTitles[n],fontsize = 10)
 
     cbars = []

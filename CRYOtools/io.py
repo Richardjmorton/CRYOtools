@@ -396,6 +396,16 @@ def write_model_results(folder: str, file: str, res: np.ndarray) -> str:
     -------
     str
         Path to the saved ``.npz`` archive.
+
+    Notes
+    -----
+    TODO (storage waste): ``res`` is typically an array of
+    :class:`scipy.optimize.OptimizeResult` objects, each of which carries
+    the full BFGS Hessian approximation (``hess_inv``) plus other solver
+    state. Downstream readers (:func:`fit._pull_fit_res`) only consume
+    ``.x`` and ``.fun``. Saving just ``(x, fun)`` as a small structured
+    array would cut the per-file footprint substantially. Left as-is for
+    now to preserve compatibility with existing ``.npz`` archives.
     """
 
     output_directory = os.path.join(folder, "spectrum_fits")

@@ -1,37 +1,95 @@
+"""JAX-based spectral fitting pipeline for Cryo-NIRSP coronal lines.
+
+Module-level side effects
+-------------------------
+Two import-time side effects are intentional but worth knowing about:
+
+1. ``os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")``
+   is applied so that XLA exposes multiple host devices for any
+   future :func:`jax.pmap`-style usage. ``setdefault`` means a user-supplied
+   ``XLA_FLAGS`` is **never** clobbered. The flag also only takes effect
+   if it is set before JAX initialises, so import :mod:`CRYOtools.fit`
+   before anything that imports JAX directly.
+2. ``jax.config.update("jax_enable_x64", True)`` is required for the
+   forward model to converge on narrow coronal lines; do not disable.
+
+For explicit control, call :func:`configure` instead of relying on these
+defaults.
+"""
+
 import os
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
+# setdefault avoids clobbering a user-supplied XLA_FLAGS environment variable.
+os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
+
+import functools
 import glob
-from copy import deepcopy
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
-from jax import config
-config.update("jax_enable_x64", True)
+from jax import config as jax_config
+jax_config.update("jax_enable_x64", True)
 
 import jax
 import jax.numpy as jnp
-import jax.scipy as jsp
-from jax import jacobian
 from jax.scipy.signal import correlate
 
 import numpy as np
 
+import optimistix as optx
+
 import matplotlib.pyplot as plt
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import differential_evolution, OptimizeResult
 from scipy.signal import correlate as corr_sp
 from scipy.signal import correlation_lags
 
-from concurrent.futures import ProcessPoolExecutor
-
-from scipy.optimize import OptimizeResult
+from concurrent.futures import ThreadPoolExecutor
 
 from tqdm.auto import tqdm
 
 from CRYOtools.io import _read_solar_model, _read_telluric_model
+from CRYOtools.config import (
+    InstrumentConfig,
+    LineConfig,
+    CRYO_NIRSP,
+    detect_line_config,
+)
 
 
-@jax.jit
-def gaussian_filter_1d(input_array: jnp.ndarray, sigma: float = 2.0) -> jnp.ndarray:
+def configure(
+    device_count: Optional[int] = None,
+    enable_x64: bool = True,
+) -> None:
+    """Set JAX/XLA runtime options explicitly.
+
+    Call this before importing JAX downstream if the import-time defaults
+    are not what you want. ``XLA_FLAGS`` is only honoured by XLA if set
+    before JAX initialises; if JAX has already been imported, changing
+    ``device_count`` here will have no effect.
+
+    Parameters
+    ----------
+    device_count
+        Forces XLA to expose this many host devices via ``XLA_FLAGS``. If
+        ``None``, leaves ``XLA_FLAGS`` unchanged.
+    enable_x64
+        Whether to enable 64-bit precision in JAX. Strongly recommended
+        ``True`` for this package.
+    """
+
+    if device_count is not None:
+        os.environ["XLA_FLAGS"] = (
+            f"--xla_force_host_platform_device_count={int(device_count)}"
+        )
+    jax_config.update("jax_enable_x64", enable_x64)
+
+
+
+@functools.partial(jax.jit, static_argnames=("radius",))
+def gaussian_filter_1d(
+    input_array: jnp.ndarray,
+    sigma: float = 2.0,
+    radius: int = 30,
+) -> jnp.ndarray:
     """Apply a 1-D Gaussian convolution to the supplied signal.
 
     Parameters
@@ -42,6 +100,12 @@ def gaussian_filter_1d(input_array: jnp.ndarray, sigma: float = 2.0) -> jnp.ndar
     sigma
         Width of the Gaussian kernel expressed in pixels. Larger values
         increase the smoothing.
+    radius
+        Half-width of the convolution kernel in pixels. Marked ``static`` so
+        that the kernel array has a compile-time-known shape. Choose
+        ``radius`` outside JIT via :func:`compute_lsf_radius` so it bounds
+        the worst-case ``sigma`` produced under the configured
+        ``Rpow_log`` bounds and ``spec_coords`` dispersion.
 
     Returns
     -------
@@ -50,8 +114,6 @@ def gaussian_filter_1d(input_array: jnp.ndarray, sigma: float = 2.0) -> jnp.ndar
         mirroring the signal.
     """
 
-    # make the radius of the filter equal to truncate standard deviations
-    radius = 30  # jnp.array(4 * sigma + 0.5, jnp.int32)
     sigma2 = sigma * sigma
     x = jnp.arange(-radius, radius + 1)
     phi_x = jnp.exp(-0.5 / sigma2 * x ** 2)
@@ -62,6 +124,51 @@ def gaussian_filter_1d(input_array: jnp.ndarray, sigma: float = 2.0) -> jnp.ndar
     smooth = correlate(signal_ext.reshape(3 * ln), phi_x[::-1], mode="same")
 
     return smooth[ln : 2 * ln]
+
+
+def compute_lsf_radius(
+    spec_coords: np.ndarray,
+    rpow_log_min: float,
+    safety_factor: float = 4.5,
+    minimum: int = 30,
+) -> int:
+    """Return a static kernel radius (pixels) for :func:`gaussian_filter_1d`.
+
+    Computed outside JIT so that the radius is a Python ``int`` known at
+    trace time. Sized to comfortably contain the worst-case (widest) LSF
+    sigma produced by the configured lower bound on ``Rpow_log`` at the
+    sampling implied by ``spec_coords``.
+
+    Parameters
+    ----------
+    spec_coords
+        Wavelength axis (nm). Only the dispersion ``|spec_coords[1] -
+        spec_coords[0]|`` and the mean wavelength are used.
+    rpow_log_min
+        Lower bound of ``log(R)`` (natural log of the resolving power).
+        Lower R \u2192 wider LSF \u2192 larger required radius.
+    safety_factor
+        Multiplier on the worst-case sigma. ``4.5`` captures > 99.999% of
+        a Gaussian; the kernel weight outside is negligible.
+    minimum
+        Floor on the returned radius. Defaults to 30 so we never go below
+        the previous hard-coded value.
+
+    Returns
+    -------
+    int
+        Radius in pixels suitable to pass as the ``radius=`` argument of
+        :func:`gaussian_filter_1d`.
+    """
+
+    spec_coords = np.asarray(spec_coords)
+    dwv = abs(float(spec_coords[1] - spec_coords[0]))
+    wave_mean = float(spec_coords.mean())
+    fwhm_wv = wave_mean / float(np.exp(rpow_log_min))
+    sigma_wv = fwhm_wv / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    sigma_pix = sigma_wv / dwv
+    return max(minimum, int(np.ceil(safety_factor * sigma_pix)))
+
 
 @jax.jit
 def gaussian(x: jnp.ndarray, amplitude: float, mean: float, sigma: float) -> jnp.ndarray:
@@ -136,8 +243,9 @@ def do_conv(x: jnp.ndarray, y: jnp.ndarray, Rpow_log: float) -> jnp.ndarray:
 
     fwhm_wv = x.mean() / jnp.exp(Rpow_log)
     sigm_wv = fwhm_wv / (2.0 * jnp.sqrt(2.0 * jnp.log(2)))
-    dwv = x[0] - x[1]
-    kern_pix = sigm_wv / jnp.abs(dwv)
+    # Use the positive dispersion magnitude so the variable name matches its value.
+    dwv = jnp.abs(x[1] - x[0])
+    kern_pix = sigm_wv / dwv
     y_conv = gaussian_filter_1d(y, sigma=kern_pix)
     return y_conv
 
@@ -180,6 +288,8 @@ def get_lags(
     data: jnp.ndarray,
     atlas: jnp.ndarray,
     spec_coords: jnp.ndarray,
+    line_config: LineConfig,
+    instrument_config: InstrumentConfig = CRYO_NIRSP,
     Solar: bool = True,
 ) -> float:
     """Estimate the pixel shift between ``data`` and a reference atlas.
@@ -192,6 +302,13 @@ def get_lags(
         Reference spectrum to correlate against ``data``.
     spec_coords
         Wavelength coordinates corresponding to both spectra.
+    line_config
+        Line-specific configuration. The ``solar_window`` and
+        ``telluric_window`` fields are used as the cross-correlation
+        bandpass.
+    instrument_config
+        Instrument-specific configuration. The ``nominal_log_rpow`` field
+        is used to pre-broaden the telluric atlas before correlation.
     Solar
         When ``True`` correlate against the solar atlas window. Otherwise the
         telluric window is used.
@@ -200,15 +317,38 @@ def get_lags(
     -------
     float
         Sub-pixel lag (in pixels) that maximises the cross-correlation.
+
+    Raises
+    ------
+    ValueError
+        If the requested cross-correlation window is unset on
+        ``line_config``.
     """
 
     if Solar:
-        index = np.where((spec_coords > 1074.85) & (spec_coords < 1075.05))[0]
-        atlas_cp = deepcopy(atlas)
+        window = line_config.solar_window
+        if window is None:
+            raise ValueError(
+                f"line_config '{line_config.name}' has no solar_window; "
+                "set it before requesting a Solar cross-correlation lag."
+            )
+        index = np.where((spec_coords > window[0]) & (spec_coords < window[1]))[0]
+        atlas_cp = atlas
     else:
-        index = np.where((spec_coords > 1074.27) & (spec_coords < 1074.4))[0]
-        # telluric profiles narrow, so broaden by a reasonable amount
-        atlas_cp = do_conv(spec_coords, atlas * np.median(data), 10.7)
+        window = line_config.telluric_window
+        if window is None:
+            raise ValueError(
+                f"line_config '{line_config.name}' has no telluric_window; "
+                "set it before requesting a telluric cross-correlation lag."
+            )
+        index = np.where((spec_coords > window[0]) & (spec_coords < window[1]))[0]
+        # Telluric features are narrow; broaden the HITRAN model to the
+        # instrument's nominal resolution before correlating.
+        atlas_cp = do_conv(
+            spec_coords,
+            atlas * np.median(data),
+            instrument_config.nominal_log_rpow,
+        )
 
     x1 = data[index]
     x2 = atlas_cp[index]
@@ -227,36 +367,66 @@ def get_lags_lin(
     data: jnp.ndarray,
     atlas: jnp.ndarray,
     spec_coords: jnp.ndarray,
+    line_config: LineConfig,
+    instrument_config: InstrumentConfig = CRYO_NIRSP,
     Solar: bool = True,
 ) -> float:
     """Cross-correlate after removing a linear background trend.
 
     Parameters
     ----------
-    data, atlas, spec_coords, Solar
-        See :func:`get_lags`. A linear background is removed from ``data`` prior
-        to correlation to reduce continuum bias.
+    data, atlas, spec_coords, line_config, instrument_config, Solar
+        See :func:`get_lags`. A linear background is subtracted from
+        ``data`` prior to correlation to reduce continuum bias. The
+        background is anchored at ``line_config.x_ref`` with slope
+        ``line_config.continuum_slope_estimate``.
 
     Returns
     -------
     float
         Sub-pixel lag (in pixels) after background correction.
+
+    Raises
+    ------
+    ValueError
+        If the requested cross-correlation window is unset on
+        ``line_config``.
     """
 
     if Solar:
-        index = np.where((spec_coords > 1074.85) & (spec_coords < 1075.05))[0]
-        atlas_cp = deepcopy(atlas)
+        window = line_config.solar_window
+        if window is None:
+            raise ValueError(
+                f"line_config '{line_config.name}' has no solar_window; "
+                "set it before requesting a Solar cross-correlation lag."
+            )
+        index = np.where((spec_coords > window[0]) & (spec_coords < window[1]))[0]
+        atlas_cp = atlas
     else:
-        index = np.where((spec_coords > 1074.27) & (spec_coords < 1074.4))[0]
-        # telluric profiles narrow, so broaden by a reasonable amount
-        atlas_cp = do_conv(spec_coords, atlas * np.median(data), 10.7)
+        window = line_config.telluric_window
+        if window is None:
+            raise ValueError(
+                f"line_config '{line_config.name}' has no telluric_window; "
+                "set it before requesting a telluric cross-correlation lag."
+            )
+        index = np.where((spec_coords > window[0]) & (spec_coords < window[1]))[0]
+        # Telluric features are narrow; broaden the HITRAN model to the
+        # instrument's nominal resolution before correlating.
+        atlas_cp = do_conv(
+            spec_coords,
+            atlas * np.median(data),
+            instrument_config.nominal_log_rpow,
+        )
 
-    # estimate and subtract linear function
-    ind_1074 = np.argmin(spec_coords - 1074)
-    y_est = data[ind_1074]
-    c = y_est - 0.25 * 1074
+    # Estimate and subtract a linear background anchored at the line centre.
+    x_ref = line_config.x_ref
+    slope = line_config.continuum_slope_estimate
+    ind_ref = np.argmin(np.abs(spec_coords - x_ref))
+    y_est = data[ind_ref]
+    # Background line passes through (x_ref, y_est) with the configured slope.
+    c = y_est - slope * x_ref
 
-    x1 = data[index] - (0.25 * spec_coords[index] + c)
+    x1 = data[index] - (slope * spec_coords[index] + c)
     x2 = atlas_cp[index]
     corr = corr_sp(standard(x1), standard(x2), "same", method="fft")
     lags = correlation_lags(x1.size, x2.size, "same")
@@ -336,86 +506,202 @@ def get_telluric_model(wave_len: np.ndarray) -> np.ndarray:
     return ftsatm
           
 
-def fit_slit(
-    img: jnp.ndarray,
-    spec_coords: jnp.ndarray,
-    do_diff: int = 0,
-    wgts: Optional[jnp.ndarray] = None,
-    use_tqdm: bool = False,
-) -> List[OptimizeResult]:
-    """Fit each spatial pixel in ``img`` with the forward model.
+@functools.partial(jax.jit, static_argnames=("radius",))
+def _build_model(
+    params: jnp.ndarray,
+    x: jnp.ndarray,
+    fts_cor: jnp.ndarray,
+    log_fts_atm: jnp.ndarray,
+    x_ref: float,
+    radius: int = 30,
+) -> jnp.ndarray:
+    """Forward model for a Cryo-NIRSP coronal-line spectrum.
+
+    This is the single canonical implementation of the forward model used
+    by both the differential-evolution global search and the
+    :mod:`optimistix` local refinement. It is defined at module level so
+    that its JIT cache key is stable across calls.
 
     Parameters
     ----------
-    img
-        Two-dimensional array with shape ``(slit_len, wavelength_len)``.
-    spec_coords
-        Wavelength coordinates corresponding to ``img``.
-    do_diff
-        Interval for re-running the global differential evolution search.
-        ``0`` triggers the search on every pixel (default behaviour).
-    wgts
-        Optional weights applied to the residual when evaluating the loss
-        function. When omitted unit weights are assumed.
-    use_tqdm
-        If ``True`` report progress with :mod:`tqdm`.
+    params
+        Length-10 parameter vector ordered as ``[amp, lam_0, sigma,
+        Rpow_log, opac, velS, velT, strayfrac, c0, c1]``. ``lam_0`` is the
+        line-centre offset from ``x_ref`` in nm; ``c0`` is the continuum
+        level at ``x_ref`` (\u03BCB\u2299) and ``c1`` is the continuum slope
+        (\u03BCB\u2299 / nm).
+    x
+        Wavelength grid (nm) for the slit pixel being fitted.
+    fts_cor
+        Solar reference spectrum sampled on ``x``.
+    log_fts_atm
+        ``log`` of the telluric transmission model sampled on ``x``.
+    x_ref
+        Air rest wavelength of the targeted coronal line in nm. Anchors
+        both the gaussian profile and the linear continuum.
+    radius
+        Half-width of the LSF convolution kernel in pixels. Static
+        argument; choose via :func:`compute_lsf_radius` so it bounds the
+        worst-case sigma under the configured ``Rpow_log`` lower bound.
 
     Returns
     -------
-    list[scipy.optimize.OptimizeResult]
-        Result of :func:`scipy.optimize.minimize` for each spatial pixel along
-        the slit.
+    jax.numpy.ndarray
+        Model spectrum sampled on ``x``.
     """
 
-    res_slits: List[OptimizeResult] = []
-    n_rows = img.shape[0]
+    (
+        amp,
+        lam_0,
+        sigma,
+        Rpow_log,
+        opac,
+        velS,
+        velT,
+        strayfrac,
+        c0,
+        c1,
+    ) = params
 
-    if do_diff == 0:
-        do_diff = n_rows
+    # Coronal emission line, centred at x_ref + lam_0.
+    gfit = gaussian(x - x_ref, amp, lam_0, sigma)
 
-    fts_cor = get_solar_model(spec_coords)
-    fts_atm = get_telluric_model(spec_coords)
-    log_fts_atm = jnp.log(fts_atm)
-    bounds = create_bounds()
+    # Shift solar reference.
+    ftsSmod = fft_shift(fts_cor, velS)
 
-    if wgts is None:
-        wgts = jnp.ones(n_rows, jnp.float64)
+    # Scale and shift telluric transmission.
+    ftsTmod = jnp.exp(opac * log_fts_atm)
+    ftsTmod = fft_shift(ftsTmod, velT)
 
-    iterator = tqdm(img, desc="Processing", disable=not use_tqdm)
-    for i, y in enumerate(iterator):
+    ftsmod = ftsSmod * ftsTmod
+    # Straylight contamination.
+    ftsmod = (ftsmod + strayfrac) / (1.0 + strayfrac)
+    # Linear continuum anchored at the line centre: c0 is the continuum
+    # level at x_ref and c1 is the slope (per nm). Anchoring at x_ref
+    # decouples the two parameters; the previous (icont + icont_lin * x)
+    # parameterisation made them nearly degenerate because x \u2248 1074 nm.
+    ftsmod = ftsmod * (c0 + c1 * (x - x_ref))
 
-        velS_est = get_lags(y, fts_cor, Solar=True)
-        velT_est = get_lags(y, fts_atm, Solar=False)
-        bounds[5] = (velS_est - 0.2, velS_est + 0.2)
-        bounds[6] = (velT_est - 0.2, velT_est + 0.2)
-        bounds[8] = (np.nanmedian(y) - 10, np.nanmedian(y) + 10)
+    # Telluric absorption is applied to the coronal line as well.
+    ifit = ftsmod + gfit * ftsTmod
 
-        if i % do_diff == 0:
-            res = differential_evolution(
-                loss,
-                bounds,
-                args=(spec_coords, y, wgts),
-                tol=1.0e-2,
-                maxiter=800,
-                popsize=1,
-            )
-        res = minimize(
-            loss,
-            res.x,
-            args=(spec_coords, y, wgts),
-            jac=jac_loss,
-            method="BFGS",
-        )
-        res_slits.append(res)
+    # Spectrograph line-spread-function convolution.
+    fwhm_wv = x.mean() / jnp.exp(Rpow_log)
+    sigm_wv = fwhm_wv / (2.0 * jnp.sqrt(2.0 * jnp.log(2)))
+    # Positive dispersion magnitude — variable name matches value.
+    dwv = jnp.abs(x[1] - x[0])
+    kern_pix = sigm_wv / dwv
+    ifit = gaussian_filter_1d(ifit, sigma=kern_pix, radius=radius)
 
-    return res_slits
+    return ifit
+
+
+@functools.partial(jax.jit, static_argnames=("radius",))
+def _loss(
+    params: jnp.ndarray,
+    args: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, float],
+    radius: int = 30,
+) -> jnp.ndarray:
+    """Weighted mean-squared-error loss.
+
+    The signature matches the :func:`optimistix.minimise` convention
+    ``fn(y, args)`` (with the additional static ``radius`` argument) so
+    the same function can be used for both the scipy
+    :func:`differential_evolution` global search and the optimistix local
+    refinement, via a thin wrapper produced by
+    :func:`_get_loss_callable`.
+
+    Parameters
+    ----------
+    params
+        Length-10 parameter vector (see :func:`_build_model`).
+    args
+        Tuple ``(y, x, wgts, fts_cor, log_fts_atm, x_ref)``.
+    radius
+        Static LSF kernel radius (see :func:`_build_model`).
+    """
+
+    y, x, wgts, fts_cor, log_fts_atm, x_ref = args
+    y_hat = _build_model(params, x, fts_cor, log_fts_atm, x_ref, radius=radius)
+    return jnp.mean((y_hat - y) ** 2 * wgts)
+
+
+@functools.lru_cache(maxsize=16)
+def _get_loss_callable(radius: int) -> Callable[[jnp.ndarray, Tuple], jnp.ndarray]:
+    """Return a ``(params, args) -> scalar`` callable with ``radius`` baked in.
+
+    Cached by radius so repeated requests with the same value return the
+    same function object. That stability matters because
+    :func:`optimistix.minimise` traces its loss function; a fresh closure
+    per call would force a re-trace.
+
+    Internal: the returned callable is not itself ``@jax.jit``-decorated.
+    It delegates to the module-level jitted :func:`_loss` which keys its
+    JIT cache on the static ``radius`` value.
+    """
+
+    def loss_fn(params: jnp.ndarray, args: Tuple) -> jnp.ndarray:
+        return _loss(params, args, radius=radius)
+
+    return loss_fn
+
+
+# Parameter-vector length used by sentinel results when a pixel fit fails.
+_N_PARAMS = 10
+
+
+def _make_sentinel_result(message: str) -> OptimizeResult:
+    """Return an OptimizeResult that signals a failed pixel fit.
+
+    Used by :meth:`fit_data.fit_slit` to record failures without
+    interrupting the slit. Sentinels preserve the uniform shape that
+    :func:`pull_fit_res` assumes when stacking results across files.
+    """
+
+    return OptimizeResult(
+        x=np.full(_N_PARAMS, np.nan),
+        fun=np.nan,
+        success=False,
+        message=message,
+    )
 
 
 class fit_data:
     """Convenience wrapper that fits every row in a Cryo slit image."""
 
-    def __init__(self, data: np.ndarray, spec_coords: np.ndarray, do_diff: int = 0) -> None:
-        """Store the dataset to be fitted and configure optimisation cadence."""
+    def __init__(
+        self,
+        data: np.ndarray,
+        spec_coords: np.ndarray,
+        do_diff: Optional[int] = None,
+        line_config: Optional[LineConfig] = None,
+        instrument_config: Optional[InstrumentConfig] = None,
+    ) -> None:
+        """Store the dataset to be fitted and configure optimisation cadence.
+
+        Parameters
+        ----------
+        data
+            Two-dimensional array with shape ``(n_along_slit, n_wavelength)``.
+        spec_coords
+            One-dimensional wavelength axis (air nm).
+        do_diff
+            Interval at which differential-evolution is rerun.
+
+            * ``None`` (default) or ``0`` \u2014 run DE only once, at the
+              first pixel of the slit, and warm-start every subsequent
+              pixel from the previous fit. Fastest; risks getting stuck
+              if the slit conditions vary strongly.
+            * ``1`` \u2014 run DE at every pixel. Most robust against local
+              minima; slowest.
+            * any ``k > 1`` \u2014 run DE every ``k`` pixels and warm-start
+              the rest.
+        line_config
+            Per-line configuration. When omitted the line is auto-detected
+            from ``spec_coords`` via :func:`config.detect_line_config`.
+        instrument_config
+            Per-instrument configuration. Defaults to :data:`config.CRYO_NIRSP`.
+        """
 
         self.data = data
         self.spec_coords = spec_coords
@@ -423,109 +709,115 @@ class fit_data:
         self.n_wv = data.shape[1]
         self.bounds: Optional[List[Tuple[float, float]]] = None
 
-        if do_diff == 0:
+        if line_config is None:
+            line_config = detect_line_config(spec_coords)
+        self.line_config = line_config
+
+        if instrument_config is None:
+            instrument_config = CRYO_NIRSP
+        self.instrument_config = instrument_config
+
+        # Canonical sentinel: None or 0 both mean "DE once per slit".
+        if do_diff is None or do_diff == 0:
             self.do_diff = self.n_along_slit
         else:
-            self.do_diff = do_diff
+            self.do_diff = int(do_diff)
 
-    def create_bounds(self, bounds: Optional[List[Tuple[float, float]]] = None) -> None:
+        # Precompute reference spectra and LSF kernel radius so that
+        # build_model / loss / calculate_model are usable before
+        # fit_slit() is ever called. The atlas I/O cost is paid once
+        # per fit_data instance; loading is ~100 ms.
+        self.fts_cor = jnp.asarray(get_solar_model(spec_coords))
+        self.fts_atm = jnp.asarray(get_telluric_model(spec_coords))
+        self.log_fts_atm = jnp.log(self.fts_atm)
+        # Default weights: unity. fit_slit overrides if the caller passes
+        # explicit weights.
+        self.wgts = jnp.ones(self.n_wv, jnp.float64)
+        # Kernel radius bounded by the worst-case (lowest-R) LSF sigma
+        # under the configured Rpow_log lower bound.
+        self.radius = compute_lsf_radius(
+            spec_coords,
+            instrument_config.rpow_log_bounds[0],
+        )
+
+    def create_bounds(
+        self,
+        bounds: Optional[List[Tuple[float, float]]] = None,
+        c0_range: Tuple[float, float] = (0.0, 200.0),
+        c1_range: Tuple[float, float] = (-10.0, 10.0),
+    ) -> None:
         """Define parameter bounds for the optimisation.
 
         Parameters
         ----------
         bounds
-            Optional set of bounds. When omitted the canonical values described
-            in the Cryo fitting notebooks are used.
+            Explicit 10-tuple bounds list. When omitted the defaults from
+            :meth:`config.LineConfig.make_bounds` are used.
+        c0_range, c1_range
+            Lower and upper bounds for the continuum-level (\u03BCB\u2299)
+            and continuum-slope (\u03BCB\u2299/nm) parameters when ``bounds``
+            is None. Defaults match the typical Fe XIII data range.
         """
 
         if bounds is None:
-            line_amp = (0, 50)
-            del_lam = (
-                1074.63 - 6 / 3e5 * 1074.63 - 1074.0,
-                1074.63 + 6 / 3e5 * 1074.63 - 1074.0,
+            bounds = self.line_config.make_bounds(
+                self.instrument_config,
+                c0_range=c0_range,
+                c1_range=c1_range,
             )
-            sigma = (0.055, 0.1)
-            rpow_log = (np.log(30000), np.log(65000))
-            opac = (0.5, 10)
-            vel_solar = (-2, 2)
-            vel_tell = (-3.2, -2.5)
-            strayfrac = (0.0, 0.5)
-            icont = (0, 0)
-            icont_lin = (0, 1)
-
-            bounds = [
-                line_amp,
-                del_lam,
-                sigma,
-                rpow_log,
-                opac,
-                vel_solar,
-                vel_tell,
-                strayfrac,
-                icont,
-                icont_lin,
-            ]
 
         self.bounds = bounds
 
-    def build_model(self, params: Sequence[float]) -> jnp.ndarray:
-        """Evaluate the forward model using the provided parameter vector."""
+    def build_model(
+        self,
+        params: Union[Sequence[float], np.ndarray, jnp.ndarray],
+    ) -> jnp.ndarray:
+        """Evaluate the forward model using the provided parameter vector.
 
-        (
-            amp,
-            lam_0,
-            sigma,
-            Rpow_log,
-            opac,
-            velS,
-            velT,
-            strayfrac,
-            icont,
-            icont_lin,
-        ) = params
+        Thin delegate around the canonical module-level :func:`_build_model`.
+        Usable immediately after construction \u2014 ``fts_cor``,
+        ``log_fts_atm`` and the LSF kernel radius are populated in
+        ``__init__``.
+        """
 
-        # ifit -- coronal line
-        gfit = gaussian(self.spec_coords - 1074.0, amp, lam_0, sigma)
+        return _build_model(
+            jnp.asarray(params),
+            jnp.asarray(self.spec_coords),
+            self.fts_cor,
+            self.log_fts_atm,
+            self.line_config.x_ref,
+            radius=self.radius,
+        )
 
-        ftsSmod = jnp.copy(self.fts_cor)
-        # shift coronal data
-        ftsSmod = fft_shift(ftsSmod, velS)
+    def loss(
+        self,
+        params: Union[Sequence[float], np.ndarray, jnp.ndarray],
+        y: Union[Sequence[float], np.ndarray, jnp.ndarray],
+    ) -> float:
+        """Return the weighted mean squared error for a candidate parameter set.
 
-        # scale and shift telluric spectra
-        ftsTmod = jnp.exp(opac * self.log_fts_atm)
-        ftsTmod = fft_shift(ftsTmod, velT)
+        Thin delegate around the canonical module-level :func:`_loss`.
+        Usable immediately after construction; ``self.wgts`` defaults to
+        unit weights and is overridden by :meth:`fit_slit` if non-trivial
+        weights are supplied.
+        """
 
-        ftsmod = ftsSmod * ftsTmod
-
-        # add straylight
-        ftsmod = (ftsmod + strayfrac) / (1.0 + strayfrac)
-        # scale for total
-        ftsmod = ftsmod * (icont + icont_lin * self.spec_coords)
-
-        # note that telluric absorption is also applied to the coronal line
-        ifit = ftsmod + gfit * ftsTmod
-
-        # convolution for spectrograph line spread function
-        # Gaussian convolution of the FTS atlas
-        fwhm_wv = self.spec_coords.mean() / jnp.exp(Rpow_log)
-        sigm_wv = fwhm_wv / (2.0 * jnp.sqrt(2.0 * jnp.log(2)))
-        dwv = self.spec_coords[0] - self.spec_coords[1]
-        kern_pix = sigm_wv / jnp.abs(dwv)
-        ifit = gaussian_filter_1d(ifit, sigma=kern_pix)
-
-        return ifit
-
-    def loss(self, params: Sequence[float], y: jnp.ndarray) -> float:
-        """Return the weighted mean squared error for a candidate parameter set."""
-
-        y_hat = self.build_model(params)
-        return float(jnp.mean((y_hat - y) ** 2 * self.wgts))
+        args = (
+            jnp.asarray(y),
+            jnp.asarray(self.spec_coords),
+            self.wgts,
+            self.fts_cor,
+            self.log_fts_atm,
+            self.line_config.x_ref,
+        )
+        return float(_loss(jnp.asarray(params), args, radius=self.radius))
 
     def fit_slit(
         self,
-        wgts: Optional[jnp.ndarray] = None,
+        wgts: Optional[Union[np.ndarray, jnp.ndarray]] = None,
         use_tqdm: bool = False,
         min_tol: float = 1e-4,
+        max_steps: int = 512,
     ) -> List[OptimizeResult]:
         """Fit each spatial position in :attr:`data`.
 
@@ -537,148 +829,193 @@ class fit_data:
         use_tqdm
             When ``True`` display a progress bar while fitting the slit.
         min_tol
-            Convergence tolerance passed to :func:`scipy.optimize.minimize`.
+            Convergence tolerance for the :mod:`optimistix` BFGS solver.
+            Used as both ``rtol`` and ``atol``.
+        max_steps
+            Maximum number of BFGS iterations per pixel.
 
         Returns
         -------
         list[scipy.optimize.OptimizeResult]
-            Result objects for each slit position.
+            One result per slit position, in order. Failed or non-finite
+            pixels are reported as sentinel results with ``x`` filled with
+            NaN, ``fun`` NaN, ``success=False``. The list is always the
+            full length ``self.n_along_slit`` so downstream stacking by
+            :func:`pull_fit_res` sees uniform shapes.
+
+        Notes
+        -----
+        The forward model and loss live at module level (:func:`_build_model`,
+        :func:`_loss`) so the JAX JIT cache hits on the second and subsequent
+        calls with the same spectral grid shape and ``radius``. The local
+        refinement uses :func:`optimistix.minimise`, which keeps the entire
+        BFGS iteration inside JIT and removes the per-step host/device
+        synchronisation that previously dominated runtime.
         """
 
         res_slits: List[OptimizeResult] = []
 
-        # some parameters are made explicit to work with JAX functions
-        fts_cor = get_solar_model(self.spec_coords)
-        self.fts_cor = fts_cor
-        fts_atm = get_telluric_model(self.spec_coords)
-        self.fts_atm = fts_atm
-        log_fts_atm = jnp.log(fts_atm)
-        self.log_fts_atm = log_fts_atm
-
         if self.bounds is None:
             self.create_bounds()
 
-        if wgts is None:
-            self.wgts = jnp.ones(self.n_wv, jnp.float64)
-            wgts = self.wgts
-        else:
-            self.wgts = wgts
+        if wgts is not None:
+            self.wgts = jnp.asarray(wgts)
+        # else: self.wgts already populated in __init__
 
-        @jax.jit
-        def build_model_int(params: Sequence[float], x: jnp.ndarray) -> jnp.ndarray:
-            (
-                amp,
-                lam_0,
-                sigma,
-                Rpow_log,
-                opac,
-                velS,
-                velT,
-                strayfrac,
-                icont,
-                icont_lin,
-            ) = params
+        # Local aliases for the hot loop.
+        fts_cor = self.fts_cor
+        fts_atm = self.fts_atm
+        log_fts_atm = self.log_fts_atm
+        wgts_arr = self.wgts
+        x = jnp.asarray(self.spec_coords)
+        x_ref = float(self.line_config.x_ref)
+        radius = int(self.radius)
+        solver = optx.BFGS(rtol=min_tol, atol=min_tol)
 
-            # ifit -- coronal line
-            gfit = gaussian(x - 1074.0, amp, lam_0, sigma)
+        # Cached optimistix-compatible wrapper with `radius` baked in. Stable
+        # function identity across pixels and across fit_data instances with
+        # the same radius means optimistix's internal trace cache hits.
+        loss_callable = _get_loss_callable(radius)
+        # Bound version of _loss for scipy.differential_evolution.
+        de_loss = functools.partial(_loss, radius=radius)
 
-            ftsSmod = jnp.copy(fts_cor)
-            # shift coronal data
-            ftsSmod = fft_shift(ftsSmod, velS)
+        # `force_de_next` tracks whether the previous pixel produced a usable
+        # warm-start. A failed / non-converged pixel poisons the chain, so we
+        # force a fresh DE search on the next pixel.
+        force_de_next = True
+        last_res: Optional[OptimizeResult] = None
 
-            # scale and shift telluric spectra
-            ftsTmod = jnp.exp(opac * log_fts_atm)
-            ftsTmod = fft_shift(ftsTmod, velT)
-
-            ftsmod = ftsSmod * ftsTmod
-
-            # add straylight
-            ftsmod = (ftsmod + strayfrac) / (1.0 + strayfrac)
-            # scale for total
-            ftsmod = ftsmod * (icont + icont_lin * x)
-
-            # note that telluric absorption is also applied to the coronal line
-            ifit = ftsmod + gfit * ftsTmod
-
-            # convolution for spectrograph line spread function
-            # Gaussian convolution of the FTS atlas
-            fwhm_wv = x.mean() / jnp.exp(Rpow_log)
-            sigm_wv = fwhm_wv / (2.0 * jnp.sqrt(2.0 * jnp.log(2)))
-            dwv = x[0] - x[1]
-            kern_pix = sigm_wv / jnp.abs(dwv)
-            ifit = gaussian_filter_1d(ifit, sigma=kern_pix)
-
-            return ifit
-
-        @jax.jit
-        def loss_int(params: Sequence[float], y: jnp.ndarray, x: jnp.ndarray, wgts: jnp.ndarray) -> float:
-            y_hat = build_model_int(params, x)
-            return jnp.mean((y_hat - y) ** 2 * wgts)
-
-        jac_loss = jax.jit(jacobian(loss_int))
-
-        x = self.spec_coords
         iterator = tqdm(range(self.n_along_slit), desc="Processing", disable=not use_tqdm)
 
         for i in iterator:
-            y = self.data[i]
+            y_np = np.asarray(self.data[i])
 
-            if i % self.do_diff == 0:
-                velS_est = get_lags_lin(y, fts_cor, x, Solar=True)
-                velT_est = get_lags_lin(y, fts_atm, x, Solar=False)
-                assert self.bounds is not None  # for type checkers
-                self.bounds[5] = (velS_est - 0.5, velS_est + 0.5)
-                self.bounds[6] = (velT_est - 0.5, velT_est + 0.5)
-                # NOTE: Review whether the constant bound limits remain appropriate.
-                self.bounds[8] = (-1000, -200)
-                res = differential_evolution(
-                    loss_int,
-                    self.bounds,
-                    args=(y, x, wgts),
-                    tol=1.0e-2,
-                    maxiter=800,
-                    popsize=1,
+            # Skip pixels with NaN / inf data: record sentinel and move on.
+            if not np.all(np.isfinite(y_np)):
+                res_slits.append(_make_sentinel_result(
+                    f"non-finite data at pixel {i}"
+                ))
+                force_de_next = True
+                last_res = None
+                continue
+
+            y = jnp.asarray(y_np)
+            loss_args = (y, x, wgts_arr, fts_cor, log_fts_atm, x_ref)
+
+            try:
+                run_de = (i % self.do_diff == 0) or force_de_next
+
+                if run_de:
+                    velS_est = get_lags_lin(
+                        y, fts_cor, x, self.line_config, self.instrument_config, Solar=True
+                    )
+                    velT_est = get_lags_lin(
+                        y, fts_atm, x, self.line_config, self.instrument_config, Solar=False
+                    )
+                    assert self.bounds is not None  # for type checkers
+                    self.bounds[5] = (velS_est - 0.5, velS_est + 0.5)
+                    self.bounds[6] = (velT_est - 0.5, velT_est + 0.5)
+
+                    de_res = differential_evolution(
+                        de_loss,
+                        self.bounds,
+                        args=(loss_args,),
+                        tol=1.0e-2,
+                        maxiter=800,
+                        popsize=15,  # DE population = popsize * len(bounds) = 150
+                    )
+                    params0 = jnp.asarray(de_res.x)
+                else:
+                    assert last_res is not None
+                    params0 = jnp.asarray(last_res.x)
+
+                sol = optx.minimise(
+                    loss_callable,
+                    solver,
+                    params0,
+                    args=loss_args,
+                    max_steps=max_steps,
+                    throw=False,
                 )
-            res = minimize(
-                loss_int,
-                res.x,
-                args=(y, x, wgts),
-                jac=jac_loss,
-                method="BFGS",
-                tol=min_tol,
-            )
+
+                # Recompute the loss once so downstream consumers can still
+                # read ``.fun`` as they did with scipy.optimize.minimize.
+                value_np = np.asarray(sol.value)
+                if not np.all(np.isfinite(value_np)):
+                    raise FloatingPointError("optimistix returned non-finite parameters")
+
+                fun_val = float(_loss(sol.value, loss_args, radius=radius))
+                success = bool(sol.result == optx.RESULTS.successful)
+                res = OptimizeResult(
+                    x=value_np,
+                    fun=fun_val,
+                    success=success,
+                    message=str(sol.result),
+                )
+                # Poisoned warm-start chain: if BFGS didn't converge, the
+                # solution may still be near a minimum but is not trustworthy
+                # as a starting point for the next pixel.
+                force_de_next = not success
+
+            except Exception as exc:  # noqa: BLE001 — broad catch is intentional
+                # Don't let one bad pixel kill the whole slit.
+                res = _make_sentinel_result(
+                    f"{type(exc).__name__} at pixel {i}: {exc}"
+                )
+                force_de_next = True
+
             res_slits.append(res)
+            last_res = res
 
         self.res_slits = res_slits
         return self.res_slits
 
-    def calculate_model(self) -> List[jnp.ndarray]:
-        """Return the forward-model profiles for the fitted results.
+    def calculate_model(self) -> np.ndarray:
+        """Return the forward-model profiles as a 2-D array.
 
-        Notes
-        -----
-        When no optimisation has been performed a singleton list containing an
-        empty array is returned for review.
+        Returns
+        -------
+        numpy.ndarray
+            Array of shape ``(n_along_slit, n_wavelength)``. Failed
+            (sentinel) pixels in :attr:`res_slits` produce NaN rows.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_slit` has not been called yet.
         """
 
-        if hasattr(self, "res_slits"):
-            return [self.build_model(r.x) for r in self.res_slits]
-        return [jnp.array([])]
+        if not hasattr(self, "res_slits"):
+            raise RuntimeError(
+                "calculate_model() requires fit_slit() to have been called first."
+            )
+
+        rows: List[np.ndarray] = []
+        for r in self.res_slits:
+            params = np.asarray(r.x)
+            if not np.all(np.isfinite(params)):
+                # Sentinel row: NaNs propagate cleanly through imshow / arithmetic.
+                rows.append(np.full(self.n_wv, np.nan))
+            else:
+                rows.append(np.asarray(self.build_model(params)))
+        return np.stack(rows)
 
     def plot_model_vs_data(self, vmin: float = -1.0, vmax: float = 1.0) -> None:
         """Plot the observed data, fitted model, and residuals."""
 
-        self.model = self.calculate_model()
-        extent = [self.spec_coords[0], self.spec_coords[-1],0,self.n_along_slit]
+        self.model = self.calculate_model()  # 2-D numpy ndarray
+        data_np = np.asarray(self.data)
+        extent = [self.spec_coords[0], self.spec_coords[-1], 0, self.n_along_slit]
         fig, ax = plt.subplots(1, 3)
-        ax[0].imshow(self.data, extent=extent, aspect=0.005, origin='lower')
+        ax[0].imshow(data_np, extent=extent, aspect=0.005, origin='lower')
         ax[0].set_title("Data")
 
         ax[1].imshow(self.model, extent=extent, aspect=0.005, origin='lower')
         ax[1].set_title("Model")
 
-        pl = ax[2].imshow(self.data - self.model, vmin=vmin, vmax=vmax,
-                                extent=extent, aspect=0.005, origin='lower')
+        residual = data_np - self.model  # both 2-D, same shape
+        pl = ax[2].imshow(residual, vmin=vmin, vmax=vmax,
+                          extent=extent, aspect=0.005, origin='lower')
         # plt.colorbar(pl)
         ax[2].set_title("Residual \n clipped {0} to {1}".format(vmin, vmax))
 
@@ -717,23 +1054,29 @@ def pull_fit_res(dataset_directory: str, cpu_max: int = 4) -> Tuple[np.ndarray, 
     dataset_directory
         Root directory that contains the ``spectrum_fits`` outputs.
     cpu_max
-        Maximum number of workers used when reading the ``.npz`` files.
+        Maximum number of I/O worker threads.
 
     Returns
     -------
     tuple[numpy.ndarray, numpy.ndarray]
         The stacked fit parameters with shape ``(n_params, n_files, n_slits)``
         and the corresponding merit function values.
+
+    Notes
+    -----
+    Uses :class:`ThreadPoolExecutor` rather than processes because the
+    workload is dominated by ``np.load`` (which releases the GIL) and a
+    process pool would otherwise pay the cold-import cost of JAX / scipy
+    in every worker.
     """
 
     fit_directory = dataset_directory + "spectrum_fits/"
 
-    file_list = glob.glob(fit_directory + "*npz")
-    file_list.sort()
+    file_list = sorted(glob.glob(fit_directory + "*npz"))
 
     ncpus = min(os.cpu_count(), cpu_max)
 
-    with ProcessPoolExecutor(max_workers=ncpus) as executor:
+    with ThreadPoolExecutor(max_workers=ncpus) as executor:
         results = list(
             tqdm(executor.map(_pull_fit_res, file_list), total=len(file_list), desc="Getting fit data")
         )
