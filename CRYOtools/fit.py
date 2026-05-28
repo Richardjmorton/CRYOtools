@@ -32,6 +32,8 @@ jax_config.update("jax_enable_x64", True)
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import correlate
+_check_jax_precision() 
+
 
 import numpy as np
 
@@ -54,6 +56,51 @@ from CRYOtools.config import (
     detect_line_config,
 )
 
+
+import warnings
+
+import hashlib
+
+# Module-level atlas cache, populated once per worker process per unique
+# spec_coords grid. Keyed on a hash of the wavelength axis so different
+# grids don't collide. The cache persists for the lifetime of the process.
+_atlas_cache: dict = {}
+
+def _get_atlases(
+    spec_coords: np.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return (fts_cor, fts_atm, log_fts_atm) for the given wavelength axis.
+    
+    Results are cached at process level so repeated calls with the same
+    spec_coords (as happens when a worker handles multiple slits) pay the
+    I/O and interpolation cost only once.
+    """
+    
+    key = hashlib.md5(np.asarray(spec_coords).tobytes()).hexdigest()
+    
+    if key not in _atlas_cache:
+        fts_cor = jnp.asarray(get_solar_model(spec_coords))
+        fts_atm = jnp.asarray(get_telluric_model(spec_coords))
+        _atlas_cache[key] = (fts_cor, fts_atm, jnp.log(fts_atm))
+    
+    return _atlas_cache[key]
+
+def _check_jax_precision() -> None:
+    """Warn if JAX is not operating in 64-bit mode.
+    
+    Checks the actual runtime dtype rather than the config flag, since
+    jax_enable_x64 silently has no effect if set after JAX initialises.
+    """
+    if jnp.ones(1).dtype != jnp.float64:
+        warnings.warn(
+            "JAX is running in 32-bit mode. CRYOtools requires 64-bit precision "
+            "for narrow coronal line fitting — results will be wrong. "
+            "Ensure `jax.config.update('jax_enable_x64', True)` runs before "
+            "any JAX computation, or import CRYOtools.fit before any other "
+            "JAX-dependent module.",
+            stacklevel=2,
+            category=RuntimeWarning,
+        )
 
 def configure(
     device_count: Optional[int] = None,
@@ -702,6 +749,7 @@ class fit_data:
         instrument_config
             Per-instrument configuration. Defaults to :data:`config.CRYO_NIRSP`.
         """
+        _check_jax_precision() 
 
         self.data = data
         self.spec_coords = spec_coords
@@ -723,13 +771,7 @@ class fit_data:
         else:
             self.do_diff = int(do_diff)
 
-        # Precompute reference spectra and LSF kernel radius so that
-        # build_model / loss / calculate_model are usable before
-        # fit_slit() is ever called. The atlas I/O cost is paid once
-        # per fit_data instance; loading is ~100 ms.
-        self.fts_cor = jnp.asarray(get_solar_model(spec_coords))
-        self.fts_atm = jnp.asarray(get_telluric_model(spec_coords))
-        self.log_fts_atm = jnp.log(self.fts_atm)
+        self.fts_cor, self.fts_atm, self.log_fts_atm = _get_atlases(spec_coords)
         # Default weights: unity. fit_slit overrides if the caller passes
         # explicit weights.
         self.wgts = jnp.ones(self.n_wv, jnp.float64)

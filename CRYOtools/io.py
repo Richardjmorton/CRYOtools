@@ -1,6 +1,6 @@
 import glob
 import os
-from importlib import resources
+from importlib.resources import files
 from typing import Any, List, Optional, Tuple
 
 import dkist
@@ -61,9 +61,9 @@ def _read_solar_model(file: Optional[str] = None) -> np.ndarray:
     if not file:
         file = "solar_merged_20200720_600_33300_100.out"
 
-    with resources.path(__package__ + ".models", file) as path:
-        # Skip the header rows provided by the source model file.
-        return np.loadtxt(path, skiprows=3)
+    path = files(__package__ + ".models").joinpath(file)
+    with path.open("r") as f:
+        return np.loadtxt(f, skiprows=3)
 
 
 def _read_telluric_model(file: Optional[str] = None) -> np.ndarray:
@@ -83,8 +83,9 @@ def _read_telluric_model(file: Optional[str] = None) -> np.ndarray:
     if not file:
         file = "hitran_1micron_h20_trans.npy"
 
-    with resources.path(__package__ + ".models", file) as path:
-        return np.load(path)
+    path = files(__package__ + ".models").joinpath(file)
+    with path.open("rb") as f:
+        return np.load(f)
 
 
 def find_L1_files(dataset_directory: str) -> Optional[List[str]]:
@@ -215,7 +216,7 @@ def rotate_stokes(data: np.ndarray, dataset_directory: str) -> np.ndarray:
         direction.
     """
 
-    hpxy_coords, _ = restore_slit_coords(dataset_directory)
+    hpxy_coords, _ ,_= restore_slit_coords(dataset_directory)
 
     linpol_rotate_angle = np.arctan2(hpxy_coords[1, :, 0, :], hpxy_coords[0, :, 0, :])
     cos2_rot = np.cos(2.0 * linpol_rotate_angle)[:, None, :, None]
@@ -344,7 +345,6 @@ def get_fits_data(
             (n_stokes, 1, n_meas_at_step - file_start, n_along_slit, n_wv),
             dtype=float,
         )
-        coadd_index = np.zeros(n_meas_at_step)
 
     print("Defined data set shape to load: ", data.shape)
 
@@ -369,7 +369,11 @@ def get_fits_data(
 
     if n_scan_steps > 1:
         # Normalise the co-added images by the number of measurements.
-        data = data / coadd_index[None, :, None, None, None]
+        safe_coadd = np.where(coadd_index == 0, 1, coadd_index)
+        data = data / safe_coadd[None, :, None, None, None]
+        n_empty = int((coadd_index == 0).sum())
+    if n_empty:
+        print(f"Warning: {n_empty} scan step(s) received no data and will be zero.")
         print('Multiple exposures co-added and averaged.')
     if convert_phot:
         data = data * 1e6

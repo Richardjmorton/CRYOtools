@@ -36,7 +36,7 @@ import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -147,8 +147,14 @@ def _worker_initialiser() -> None:
     # within each worker will overlap with the others. In practice this
     # produces good throughput without the heavy oversubscription seen
     # when each worker forces the default 4-device flag from fit.py.
-    os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=1"
-    # Stay on CPU regardless of any GPU visible to the worker.
+    existing = os.environ.get("XLA_FLAGS", "")
+    # Remove any existing device count flag, then append the worker-specific value.
+    cleaned = " ".join(
+        f for f in existing.split()
+        if not f.startswith("--xla_force_host_platform_device_count")
+    )
+    worker_flag = "--xla_force_host_platform_device_count=1"
+    os.environ["XLA_FLAGS"] = f"{cleaned} {worker_flag}".strip()
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 

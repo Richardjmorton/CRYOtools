@@ -104,6 +104,7 @@ class LineConfig:
     solar_window: Optional[Tuple[float, float]] = None
     telluric_window: Optional[Tuple[float, float]] = None
     continuum_slope_estimate: float = 0.25  # \u03BCB\u2299 / nm
+    continuum_ref: float = 0.0   # wavelength (nm)
 
     # ----- derived quantities -------------------------------------------------
 
@@ -159,6 +160,7 @@ FE_XIII_1074 = LineConfig(
     x_ref=1074.63,                          # air, matches the previous create_bounds value
     solar_window=(1074.85, 1075.05),        # photospheric scattered-light feature
     telluric_window=(1074.27, 1074.40),     # H2O telluric feature
+    continuum_ref=1074.0.
 )
 
 
@@ -167,6 +169,7 @@ FE_XIII_1080 = LineConfig(
     x_ref=1079.79,                          # NIST/CHIANTI; air convention for spec_coords
     solar_window=(1078.2,1078.8),           # photospheric scattered-light feature
     telluric_window=(1079.9,1080.1),        # H2O telluric feature
+    continuum_ref=1080.2,
 )
 
 

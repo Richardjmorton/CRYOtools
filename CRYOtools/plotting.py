@@ -317,7 +317,7 @@ def plot_all_params_scan(
                                norm = PowerNorm(0.85, vmin=0, vmax=intm), aspect=aspect)
             #imn.set_clim(np.nanpercentile(para_map,[2,98]))
         if n ==1:
-            dopp_vels = shift_to_v(para_map)
+            dopp_vels = shift_to_v(para_map, spec_coords=spec_coords)
             median_vel = np.nanmedian(dopp_vels.value)
             imn = ax[n].imshow(dopp_vels.value-median_vel,extent = img_extent,cmap = doppvel_cmap, aspect=aspect)
             imn.set_clim(-3,3)
@@ -391,7 +391,7 @@ def plot_all_params_ss(
                                norm = PowerNorm(0.85), aspect=aspect)
             #imn.set_clim(np.nanpercentile(para_map,[2,98]))
         if n ==1:
-            dopp_vels = shift_to_v(para_map)
+            dopp_vels = shift_to_v(para_map, spec_coords=spec_coords)
             median_vel = np.nanmedian(dopp_vels.value)
             imn = ax[n].imshow(dopp_vels.value-median_vel,extent = imgExtent,cmap = doppvel_cmap, aspect=aspect)
             imn.set_clim(-3,3)
@@ -429,7 +429,7 @@ def plot_coronal_params(
     fold: int = 1,
     figsize: Tuple[float, float] = (15, 5),
     amp_clip: float = 50,
-    slit_coord: float = None
+    slit_coord: Optional[float] = None
 ) -> None:
     """Plot a subset of coronal parameters (amplitude, velocity, width).
 
@@ -440,7 +440,7 @@ def plot_coronal_params(
     # Suppress extreme amplitudes that may arise from fitting artefacts.
     amp[np.abs(amp) > amp_clip] = 0
     vel = results[1]
-    vel = shift_to_v(vel)
+    vel = shift_to_v(vel, spec_coords=spec_coords)
     width = results[2]
 
     res = return_obs_info(hdrs, verbose=False)

@@ -340,22 +340,19 @@ def calculate_cadence(tc: np.ndarray, plot_cad: bool = False) -> float:
     return med_cad
 
 
-def which_line(spec_coords: np.ndarray, verbose: bool = True) -> Tuple[float, int, int]:
+def which_line(
+    spec_coords: np.ndarray,
+    verbose: bool = True,
+) -> Tuple[float, int, int]:
     """Return the central wavelength and indices for the line and continuum pixels."""
 
-    if (1074.65 > spec_coords.min()) and (1074.65 < spec_coords.max()):
-        wv_cen = 1074.65  # wavelength center of targeted coronal Fe XIII line
-        # pixel location of coronal line
-        wv_line = np.argmin(np.abs(spec_coords - 1074.65))
-        wv_cont = np.argmin(np.abs(spec_coords - 1074.0))  # pixel location of clean continuum
-    elif (1079.8 > spec_coords.min()) and (1079.8 < spec_coords.max()):
+    from CRYOtools.config import detect_line_config   # local to avoid circular import
 
-        wv_cen = 1079.8  # wavelength center of targeted coronal Fe XIII line
-        wv_line = np.argmin(np.abs(spec_coords - 1079.8))  # pixel location of coronal line
-        wv_cont = np.argmin(np.abs(spec_coords - 1080.2))  # pixel location of clean continuum
-    else:
-        print('Wavelength case not handled yet')
-        raise
+    cfg = detect_line_config(spec_coords)   # raises ValueError for unknown lines
+
+    wv_cen = cfg.x_ref
+    wv_line = int(np.argmin(np.abs(spec_coords - cfg.x_ref)))
+    wv_cont = int(np.argmin(np.abs(spec_coords - cfg.continuum_ref)))
 
     if verbose:
         print(f"Coronal line nominal center wavelength [nm]: {wv_cen}")
@@ -363,30 +360,25 @@ def which_line(spec_coords: np.ndarray, verbose: bool = True) -> Tuple[float, in
         print(f"Spectral pixel index for continuum reference: {wv_cont}")
 
     return wv_cen, wv_line, wv_cont
- 
 
 def shift_to_v(
     delta_lam: np.ndarray,
-    lam_0: float = 1074.7,
-    lam_cor: float = 0.7,
+    line_config: Optional[LineConfig] = None,
+    spec_coords: Optional[np.ndarray] = None,
 ) -> u.Quantity:
-    """Convert wavelength shifts to Doppler velocities in km/s.
- 
-    Parameters
-    ----------
-    delta_lam
-        Array of measured wavelength offsets.
-    lam_0
-        Rest wavelength (nm) of the observed spectral line.
-    lam_cor
-        Empirical correction applied to the measured wavelength shifts.
-    """
+    """Convert wavelength offsets (from x_ref) to Doppler velocities in km/s."""
+
+    from CRYOtools.config import detect_line_config, LineConfig
+
+    if line_config is None:
+        if spec_coords is None:
+            raise ValueError("Either line_config or spec_coords must be provided.")
+        line_config = detect_line_config(spec_coords)
 
     c_km_s = const.c.to(u.km / u.s)
-    # correction to measured shifts (from fitting procedure)
-    corrected = (delta_lam - lam_cor) / lam_0
+    corrected = delta_lam / line_config.x_ref   # lam_cor gone; offset is relative to x_ref
     F = corrected - 1
-    return ((F ** 2 - 1) / (F ** 2 + 1)) * c_km_s  # Doppler formula
+    return ((F ** 2 - 1) / (F ** 2 + 1)) * c_km_s
  
  
 def calc_ntlw(
@@ -400,7 +392,7 @@ def calc_ntlw(
     Parameters
     ----------
     data
-        Observed full-width-half-maximum (FWHM) values in nanometers.
+        Observed Gaussian sigma  values in nanometers.
     res_pow
         Instrument resolving power.
     wave
