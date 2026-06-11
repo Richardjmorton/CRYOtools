@@ -282,7 +282,6 @@ def plot_all_params_scan(
     slit_samp, step_width = get_slit_samp(hpxy_coords, n_scan_steps, verbose=False)
     # Determine the wavelength indices so downstream scaling is consistent.
     wv_cen, _, _ = which_line(spec_coords, verbose=False)
-
     n_maps = fit_results.shape[0]
 
     plotTitles= [r"Line Peak Amplitude [$\mu$B$_{\odot}$]",
@@ -321,7 +320,11 @@ def plot_all_params_scan(
             median_vel = np.nanmedian(dopp_vels.value)
             imn = ax[n].imshow(dopp_vels.value-median_vel,extent = img_extent,cmap = doppvel_cmap, aspect=aspect)
             imn.set_clim(-3,3)
-        if n >1:
+        if n ==2:
+            imn = ax[n].imshow(np.abs(para_map),extent = img_extent,cmap = default_cmap, aspect=aspect)
+            imn.set_clim(np.nanpercentile(np.abs(para_map),[2,98]))
+
+        if n >2:
             imn = ax[n].imshow(para_map,extent = img_extent,cmap = default_cmap, aspect=aspect)
             imn.set_clim(np.nanpercentile(para_map,[2,98]))
         ax[n].set_title(plotTitles[n],fontsize = 10)
@@ -344,6 +347,7 @@ def plot_all_params_scan(
     fig.supylabel("Arcseconds in Stepping Direction",fontsize = 18)
     fig.supxlabel("Arcseconds along slit",fontsize = 18)
     fig.tight_layout()
+    plt.show()
 
 
 def plot_all_params_ss(
@@ -395,7 +399,11 @@ def plot_all_params_ss(
             median_vel = np.nanmedian(dopp_vels.value)
             imn = ax[n].imshow(dopp_vels.value-median_vel,extent = imgExtent,cmap = doppvel_cmap, aspect=aspect)
             imn.set_clim(-3,3)
-        if n >1:
+        if n ==2:
+            imn = ax[n].imshow(np.abs(para_map),extent = imgExtent,cmap = default_cmap, aspect=aspect)
+            imn.set_clim(np.nanpercentile(np.abs(para_map),[2,98]))
+
+        if n >2:
             imn = ax[n].imshow(para_map,extent = imgExtent,cmap = default_cmap, aspect=aspect)
             imn.set_clim(np.nanpercentile(para_map,[2,98]))
         ax[n].set_title(plotTitles[n],fontsize = 10)
@@ -441,7 +449,7 @@ def plot_coronal_params(
     amp[np.abs(amp) > amp_clip] = 0
     vel = results[1]
     vel = shift_to_v(vel, spec_coords=spec_coords)
-    width = results[2]
+    width = np.abs(results[2])
 
     res = return_obs_info(hdrs, verbose=False)
     n_scan_steps, n_meas_at_step, n_wv, n_along_slit = res

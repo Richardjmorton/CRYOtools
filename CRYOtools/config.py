@@ -160,7 +160,7 @@ FE_XIII_1074 = LineConfig(
     x_ref=1074.63,                          # air, matches the previous create_bounds value
     solar_window=(1074.85, 1075.05),        # photospheric scattered-light feature
     telluric_window=(1074.27, 1074.40),     # H2O telluric feature
-    continuum_ref=1074.0.
+    continuum_ref=1074.0,
 )
 
 

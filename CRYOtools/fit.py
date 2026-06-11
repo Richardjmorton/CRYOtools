@@ -32,7 +32,7 @@ jax_config.update("jax_enable_x64", True)
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import correlate
-_check_jax_precision() 
+
 
 
 import numpy as np
@@ -101,6 +101,8 @@ def _check_jax_precision() -> None:
             stacklevel=2,
             category=RuntimeWarning,
         )
+
+_check_jax_precision() 
 
 def configure(
     device_count: Optional[int] = None,
